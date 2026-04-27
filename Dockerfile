@@ -16,6 +16,10 @@ RUN npm install --omit=dev
 # Copy source code
 COPY . .
 
+# Set environment variables for production
+ENV NODE_ENV=production
+ENV PORT=3001
+
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs
 RUN adduser -S nodejs -u 1001
