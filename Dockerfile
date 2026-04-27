@@ -16,7 +16,7 @@ RUN npm install --omit=dev
 # Copy source code
 COPY . .
 
-# Set environment variables for production
+# Set basic environment variables
 ENV NODE_ENV=production
 ENV PORT=3001
 
