@@ -7,27 +7,89 @@ exports.createPermissionsTables = async (req, res) => {
   try {
     console.log('🚀 Criando tabelas de permissões via SQL direto...')
     
+    // Testar conexão primeiro
+    try {
+      await knex.raw('SELECT 1 as test')
+      console.log('✅ Conexão com banco OK')
+    } catch (connError) {
+      console.error('❌ Erro de conexão:', connError.message)
+      return res.status(500).json({
+        error: 'Erro de conexão com o banco de dados',
+        details: connError.message,
+        suggestion: 'Verifique se o PostgreSQL está rodando e as credenciais estão corretas'
+      })
+    }
+    
     // Ler arquivo SQL
     const sqlPath = path.join(__dirname, '../../create-permissions-tables.sql')
+    
+    if (!fs.existsSync(sqlPath)) {
+      return res.status(500).json({
+        error: 'Arquivo SQL não encontrado',
+        path: sqlPath
+      })
+    }
+    
     const sqlContent = fs.readFileSync(sqlPath, 'utf8')
+    console.log('📄 Arquivo SQL carregado, tamanho:', sqlContent.length, 'caracteres')
     
-    console.log('📄 Executando SQL...')
+    // Dividir SQL em comandos separados (por ponto e vírgula)
+    const commands = sqlContent
+      .split(';')
+      .map(cmd => cmd.trim())
+      .filter(cmd => cmd.length > 0 && !cmd.startsWith('--'))
     
-    // Executar SQL direto
-    const result = await knex.raw(sqlContent)
+    console.log('📊 Executando', commands.length, 'comandos SQL...')
     
-    console.log('✅ Tabelas criadas com sucesso!')
-    console.log('📊 Resultado:', result.rows)
+    const results = []
+    
+    // Executar cada comando separadamente
+    for (let i = 0; i < commands.length; i++) {
+      const command = commands[i]
+      if (command.trim()) {
+        try {
+          console.log(`🔄 Executando comando ${i + 1}/${commands.length}`)
+          const result = await knex.raw(command)
+          results.push({ command: i + 1, status: 'success', rows: result.rowCount || 0 })
+        } catch (cmdError) {
+          console.error(`❌ Erro no comando ${i + 1}:`, cmdError.message)
+          // Continuar mesmo com erro (pode ser comando já executado)
+          results.push({ command: i + 1, status: 'error', error: cmdError.message })
+        }
+      }
+    }
+    
+    console.log('✅ Execução SQL concluída!')
+    
+    // Verificar se as tabelas foram criadas
+    const verification = {}
+    const tables = ['user_profiles', 'system_screens', 'profile_permissions']
+    
+    for (const table of tables) {
+      try {
+        const exists = await knex.schema.hasTable(table)
+        if (exists) {
+          const count = await knex(table).count('* as total').first()
+          verification[table] = { exists: true, count: parseInt(count.total) }
+        } else {
+          verification[table] = { exists: false, count: 0 }
+        }
+      } catch (verifyError) {
+        verification[table] = { exists: false, error: verifyError.message }
+      }
+    }
     
     res.json({
-      message: 'Tabelas de permissões criadas com sucesso',
-      status: 'created',
+      message: 'Execução SQL concluída',
+      status: 'executed',
       timestamp: new Date().toISOString(),
-      verification: result.rows || []
+      commands_executed: results.length,
+      results: results,
+      verification: verification
     })
     
   } catch (error) {
-    console.error('❌ Erro ao criar tabelas:', error)
+    console.error('❌ Erro geral ao criar tabelas:', error)
     res.status(500).json({ 
       error: 'Erro ao criar tabelas de permissões',
       details: error.message,
@@ -220,16 +282,37 @@ exports.deployMigrations = async (req, res) => {
 // ─── Verificar se Tabelas Existem ─────────────────────────────────────────────
 exports.checkPermissionsTables = async (req, res) => {
   try {
+    console.log('🔍 Verificando conexão e tabelas...')
+    
+    // Primeiro testar conexão básica
+    try {
+      await knex.raw('SELECT 1 as test')
+      console.log('✅ Conexão com banco OK')
+    } catch (connError) {
+      console.error('❌ Erro de conexão:', connError.message)
+      return res.status(500).json({
+        status: 'connection_error',
+        error: 'Erro de conexão com o banco de dados',
+        details: connError.message,
+        suggestion: 'Verifique se o PostgreSQL está rodando e as credenciais estão corretas'
+      })
+    }
+    
     const tables = ['user_profiles', 'system_screens', 'profile_permissions']
     const results = {}
     
     for (const table of tables) {
-      const exists = await knex.schema.hasTable(table)
-      if (exists) {
-        const count = await knex(table).count('* as total').first()
-        results[table] = { exists: true, count: count.total }
-      } else {
-        results[table] = { exists: false, count: 0 }
+      try {
+        const exists = await knex.schema.hasTable(table)
+        if (exists) {
+          const count = await knex(table).count('* as total').first()
+          results[table] = { exists: true, count: parseInt(count.total) }
+        } else {
+          results[table] = { exists: false, count: 0 }
+        }
+      } catch (tableError) {
+        console.error(`❌ Erro ao verificar tabela ${table}:`, tableError.message)
+        results[table] = { exists: false, count: 0, error: tableError.message }
       }
     }
     
@@ -238,14 +321,17 @@ exports.checkPermissionsTables = async (req, res) => {
     res.json({
       status: allExist ? 'ready' : 'missing_tables',
       tables: results,
-      message: allExist ? 'Todas as tabelas existem' : 'Algumas tabelas estão faltando'
+      message: allExist ? 'Todas as tabelas existem' : 'Algumas tabelas estão faltando',
+      timestamp: new Date().toISOString()
     })
     
   } catch (error) {
-    console.error('❌ Erro ao verificar tabelas:', error)
+    console.error('❌ Erro geral ao verificar tabelas:', error)
     res.status(500).json({ 
+      status: 'error',
       error: 'Erro ao verificar tabelas',
-      details: error.message 
+      details: error.message,
+      timestamp: new Date().toISOString()
     })
   }
 }
