@@ -32,6 +32,16 @@ app.use(cors({ origin: ['http://localhost:3000', 'http://127.0.0.1:3000'] }))
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 
+// Middleware para evitar cache em rotas de API
+app.use('/api', (req, res, next) => {
+  res.set({
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  })
+  next()
+})
+
 // Request logger (dev)
 app.use((req, _res, next) => {
   console.log(`[${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`)
