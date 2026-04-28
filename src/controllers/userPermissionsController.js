@@ -3,6 +3,14 @@ const knex = require('../db/connection')
 // ─── Listar Perfis ────────────────────────────────────────────────────────────
 exports.getProfiles = async (req, res) => {
   try {
+    // Verificar se a tabela existe
+    const tableExists = await knex.schema.hasTable('user_profiles')
+    if (!tableExists) {
+      return res.status(500).json({ 
+        error: 'Tabela user_profiles não existe. Execute as migrations primeiro.' 
+      })
+    }
+
     const profiles = await knex('user_profiles')
       .where('is_active', true)
       .orderBy('name')
@@ -10,7 +18,7 @@ exports.getProfiles = async (req, res) => {
     res.json({ data: profiles })
   } catch (error) {
     console.error('Erro ao buscar perfis:', error)
-    res.status(500).json({ error: 'Erro interno do servidor' })
+    res.status(500).json({ error: 'Erro interno do servidor: ' + error.message })
   }
 }
 

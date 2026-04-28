@@ -1,4 +1,40 @@
 const knex = require('../db/connection')
+const fs = require('fs')
+const path = require('path')
+
+// ─── Executar SQL Direto ──────────────────────────────────────────────────────
+exports.createPermissionsTables = async (req, res) => {
+  try {
+    console.log('🚀 Criando tabelas de permissões via SQL direto...')
+    
+    // Ler arquivo SQL
+    const sqlPath = path.join(__dirname, '../../create-permissions-tables.sql')
+    const sqlContent = fs.readFileSync(sqlPath, 'utf8')
+    
+    console.log('📄 Executando SQL...')
+    
+    // Executar SQL direto
+    const result = await knex.raw(sqlContent)
+    
+    console.log('✅ Tabelas criadas com sucesso!')
+    console.log('📊 Resultado:', result.rows)
+    
+    res.json({
+      message: 'Tabelas de permissões criadas com sucesso',
+      status: 'created',
+      timestamp: new Date().toISOString(),
+      verification: result.rows || []
+    })
+    
+  } catch (error) {
+    console.error('❌ Erro ao criar tabelas:', error)
+    res.status(500).json({ 
+      error: 'Erro ao criar tabelas de permissões',
+      details: error.message,
+      timestamp: new Date().toISOString()
+    })
+  }
+}
 
 // ─── Executar Migrations ──────────────────────────────────────────────────────
 exports.runMigrations = async (req, res) => {
@@ -177,6 +213,39 @@ exports.deployMigrations = async (req, res) => {
       error: 'Erro no deploy das migrations',
       details: error.message,
       timestamp: new Date().toISOString()
+    })
+  }
+}
+
+// ─── Verificar se Tabelas Existem ─────────────────────────────────────────────
+exports.checkPermissionsTables = async (req, res) => {
+  try {
+    const tables = ['user_profiles', 'system_screens', 'profile_permissions']
+    const results = {}
+    
+    for (const table of tables) {
+      const exists = await knex.schema.hasTable(table)
+      if (exists) {
+        const count = await knex(table).count('* as total').first()
+        results[table] = { exists: true, count: count.total }
+      } else {
+        results[table] = { exists: false, count: 0 }
+      }
+    }
+    
+    const allExist = Object.values(results).every(r => r.exists)
+    
+    res.json({
+      status: allExist ? 'ready' : 'missing_tables',
+      tables: results,
+      message: allExist ? 'Todas as tabelas existem' : 'Algumas tabelas estão faltando'
+    })
+    
+  } catch (error) {
+    console.error('❌ Erro ao verificar tabelas:', error)
+    res.status(500).json({ 
+      error: 'Erro ao verificar tabelas',
+      details: error.message 
     })
   }
 }
