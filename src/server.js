@@ -53,32 +53,49 @@ console.log('🔍 Carregando routes...')
 console.log('🔍 suppliesRoutes:', typeof suppliesRoutes)
 console.log('🔍 suppliersRoutes:', typeof suppliersRoutes)
 console.log('🔍 customersRoutes:', typeof customersRoutes)
+console.log('🔍 migrationsRoutes:', typeof migrationsRoutes)
+console.log('🔍 userPermissionsRoutes:', typeof userPermissionsRoutes)
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
-app.use('/api/supplies',  suppliesRoutes)
-app.use('/api/suppliers', suppliersRoutes)
-app.use('/api/customers', customersRoutes)
-app.use('/api/products',  productsRoutes)
-app.use('/api/formulas',  formulasRoutes)
-app.use('/api/batches',   batchesRoutes)
-app.use('/api/bottlings', bottlingsRoutes)
-app.use('/api/logs',      activityLogsRoutes)
-app.use('/api/dashboard', dashboardRoutes)
-app.use('/api/orders',    ordersRoutes)
-app.use('/api/kits',      kitsRoutes)
-app.use('/api/coupons',   couponsRoutes)
-app.use('/api/losses',    lossesRoutes)
-app.use('/api/donations', donationsRoutes)
-app.use('/api/batch-transfers', batchTransfersRoutes)
-app.use('/api/occurrences', occurrencesRoutes)
-app.use('/api/traceability', traceabilityRoutes)
-app.use('/api/customer-gifts', customerGiftsRoutes)
-app.use('/api/system-rules', systemRulesRoutes)
-app.use('/api/user-permissions', userPermissionsRoutes)
-app.use('/api/migrations', migrationsRoutes)
+try {
+  app.use('/api/supplies',  suppliesRoutes)
+  app.use('/api/suppliers', suppliersRoutes)
+  app.use('/api/customers', customersRoutes)
+  app.use('/api/products',  productsRoutes)
+  app.use('/api/formulas',  formulasRoutes)
+  app.use('/api/batches',   batchesRoutes)
+  app.use('/api/bottlings', bottlingsRoutes)
+  app.use('/api/logs',      activityLogsRoutes)
+  app.use('/api/dashboard', dashboardRoutes)
+  app.use('/api/orders',    ordersRoutes)
+  app.use('/api/kits',      kitsRoutes)
+  app.use('/api/coupons',   couponsRoutes)
+  app.use('/api/losses',    lossesRoutes)
+  app.use('/api/donations', donationsRoutes)
+  app.use('/api/batch-transfers', batchTransfersRoutes)
+  app.use('/api/occurrences', occurrencesRoutes)
+  app.use('/api/traceability', traceabilityRoutes)
+  app.use('/api/customer-gifts', customerGiftsRoutes)
+  app.use('/api/system-rules', systemRulesRoutes)
+  app.use('/api/user-permissions', userPermissionsRoutes)
+  app.use('/api/migrations', migrationsRoutes)
+  
+  console.log('✅ Todas as rotas carregadas com sucesso')
+} catch (routeError) {
+  console.error('❌ Erro ao carregar rotas:', routeError)
+}
 
 // Health check
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }))
+
+// Test endpoint simples
+app.get('/api/test', (_req, res) => {
+  res.json({ 
+    message: 'Backend funcionando!', 
+    timestamp: new Date().toISOString(),
+    routes_loaded: true
+  })
+})
 
 // 404
 app.use((_req, res) => res.status(404).json({ error: 'Route not found' }))
