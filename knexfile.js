@@ -1,16 +1,16 @@
-// Configuração do Knex.js para PostgreSQL (Supabase)
+// Configuração do Knex.js para PostgreSQL (Coolify)
 require('dotenv').config()
 
 module.exports = {
   development: {
     client: 'pg',
-    connection: {
+    connection: process.env.DATABASE_URL || {
       host: process.env.DB_HOST,
-      port: process.env.DB_PORT || 6543, // Session Pooler para IPv4
+      port: process.env.DB_PORT || 5432,
       database: process.env.DB_NAME,
       user: process.env.DB_USER,
       password: process.env.DB_PASSWORD,
-      ssl: { rejectUnauthorized: false } // Supabase requer SSL
+      ssl: false
     },
     pool: {
       min: 2,

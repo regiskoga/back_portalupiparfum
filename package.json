@@ -11,7 +11,8 @@
     "seed:run": "knex seed:run",
     "db:setup": "npm run migrate:latest && npm run seed:run",
     "db:init": "node scripts/init-db.js",
-    "db:check": "node scripts/check-db.js"
+    "db:check": "node scripts/check-db.js",
+    "deploy:migrations": "node deploy-migrations.js"
   },
   "dependencies": {
     "axios": "^1.15.2",

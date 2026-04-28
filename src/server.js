@@ -21,6 +21,8 @@ const occurrencesRoutes = require('./routes/occurrences')
 const traceabilityRoutes = require('./routes/traceability')
 const customerGiftsRoutes = require('./routes/customerGifts')
 const systemRulesRoutes = require('./routes/systemRules')
+const userPermissionsRoutes = require('./routes/userPermissions')
+const migrationsRoutes = require('./routes/migrations')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
@@ -62,6 +64,8 @@ app.use('/api/occurrences', occurrencesRoutes)
 app.use('/api/traceability', traceabilityRoutes)
 app.use('/api/customer-gifts', customerGiftsRoutes)
 app.use('/api/system-rules', systemRulesRoutes)
+app.use('/api/user-permissions', userPermissionsRoutes)
+app.use('/api/migrations', migrationsRoutes)
 
 // Health check
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }))
