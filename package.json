@@ -10,7 +10,8 @@
     "migrate:rollback": "knex migrate:rollback",
     "seed:run": "knex seed:run",
     "db:setup": "npm run migrate:latest && npm run seed:run",
-    "db:init": "node scripts/init-db.js"
+    "db:init": "node scripts/init-db.js",
+    "db:check": "node scripts/check-db.js"
   },
   "dependencies": {
     "axios": "^1.15.2",
