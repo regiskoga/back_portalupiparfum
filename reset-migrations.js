@@ -18,7 +18,7 @@ async function resetMigrations() {
   const db = knex(config)
   
   try {
-    console.log('🔄 Conectando ao Supabase...')
+    console.log('🔄 Conectando ao PostgreSQL (Coolify)...')
     
     // Testar conexão
     await db.raw('SELECT 1')
@@ -37,7 +37,7 @@ async function resetMigrations() {
     
     if (error.code === 'ETIMEDOUT') {
       console.log('\n💡 Possíveis soluções:')
-      console.log('1. Verificar se o projeto Supabase está ativo')
+      console.log('1. Verificar se o PostgreSQL está ativo no Coolify')
       console.log('2. Tentar porta 5432 em vez de 6543')
       console.log('3. Verificar firewall/proxy corporativo')
     }

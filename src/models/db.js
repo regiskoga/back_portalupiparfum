@@ -13,7 +13,7 @@ const db = knex(config)
 // Testar conexão
 db.raw('SELECT 1')
   .then(() => {
-    console.log('✅ Conectado ao PostgreSQL (Supabase)')
+    console.log('✅ Conectado ao PostgreSQL (Coolify)')
   })
   .catch((err) => {
     console.error('❌ Erro ao conectar ao PostgreSQL:', err.message)
