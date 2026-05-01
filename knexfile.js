@@ -17,11 +17,11 @@ module.exports = {
       max: 10
     },
     migrations: {
-      directory: './src/migrations',
+      directory: './src/db/migrations',
       tableName: 'knex_migrations'
     },
     seeds: {
-      directory: './src/seeds'
+      directory: './src/db/seeds'
     }
   },
 
@@ -40,11 +40,11 @@ module.exports = {
       max: 10
     },
     migrations: {
-      directory: './src/migrations',
+      directory: './src/db/migrations',
       tableName: 'knex_migrations'
     },
     seeds: {
-      directory: './src/seeds'
+      directory: './src/db/seeds'
     }
   }
 }
