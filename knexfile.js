@@ -17,11 +17,11 @@ module.exports = {
       max: 10
     },
     migrations: {
-      directory: './src/db/migrations',
+      directory: './src/migrations',
       tableName: 'knex_migrations'
     },
     seeds: {
-      directory: './src/db/seeds'
+      directory: './src/seeds'
     }
   },
 
@@ -33,18 +33,18 @@ module.exports = {
       database: process.env.DB_NAME,
       user: process.env.DB_USER,
       password: process.env.DB_PASSWORD,
-      ssl: false
+      ssl: { rejectUnauthorized: false }
     },
     pool: {
       min: 2,
       max: 10
     },
     migrations: {
-      directory: './src/db/migrations',
+      directory: './src/migrations',
       tableName: 'knex_migrations'
     },
     seeds: {
-      directory: './src/db/seeds'
+      directory: './src/seeds'
     }
   }
 }
