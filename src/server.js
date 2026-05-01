@@ -28,21 +28,25 @@ const app  = express()
 const PORT = process.env.PORT || 3001
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
-app.use(cors({ 
-  origin: [
-    'http://localhost:3000', 
-    'http://127.0.0.1:3000',
-    'http://sistema.portalupiparfum.com.br',
-    'https://sistema.portalupiparfum.com.br'
-  ],
+// CORS configurado para aceitar requisições do frontend
+// TEMPORÁRIO: Permitir todas as origens para debug
+const corsOptions = {
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  credentials: true
-}))
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  credentials: false,
+  optionsSuccessStatus: 204,
+  preflightContinue: false
+}
 
-// Debug CORS
+app.use(cors(corsOptions))
+
+// Debug CORS detalhado
 app.use((req, res, next) => {
-  console.log(`🌐 CORS Request: ${req.method} ${req.url} from ${req.get('Origin') || 'no-origin'}`)
+  console.log(`🌐 ${req.method} ${req.url}`)
+  console.log(`   Origin: ${req.get('Origin') || 'none'}`)
+  console.log(`   Host: ${req.get('Host')}`)
+  console.log(`   Headers:`, req.headers)
   next()
 })
 app.use(express.json())
@@ -101,16 +105,36 @@ try {
   console.error('❌ Erro ao carregar rotas:', routeError)
 }
 
-// Health check
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }))
-
-// Test endpoint simples
-app.get('/api/test', (_req, res) => {
+// Health check com CORS headers explícitos
+app.get('/api/health', (_req, res) => {
+  res.header('Access-Control-Allow-Origin', '*')
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   res.json({ 
-    message: 'Backend funcionando!', 
-    timestamp: new Date().toISOString(),
-    routes_loaded: true
+    status: 'ok', 
+    ts: new Date().toISOString(),
+    cors: 'enabled'
   })
+})
+
+// CORS test endpoint
+app.get('/api/cors-test', (_req, res) => {
+  res.header('Access-Control-Allow-Origin', '*')
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  res.json({ 
+    message: 'CORS está funcionando!',
+    timestamp: new Date().toISOString(),
+    headers_received: _req.headers
+  })
+})
+
+// OPTIONS handler explícito para todas as rotas /api/*
+app.options('/api/*', (_req, res) => {
+  res.header('Access-Control-Allow-Origin', '*')
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS')
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept')
+  res.sendStatus(204)
 })
 
 // 404
