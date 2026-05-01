@@ -34,8 +34,17 @@ app.use(cors({
     'http://127.0.0.1:3000',
     'http://sistema.portalupiparfum.com.br',
     'https://sistema.portalupiparfum.com.br'
-  ] 
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  credentials: true
 }))
+
+// Debug CORS
+app.use((req, res, next) => {
+  console.log(`🌐 CORS Request: ${req.method} ${req.url} from ${req.get('Origin') || 'no-origin'}`)
+  next()
+})
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 
