@@ -9,23 +9,27 @@ exports.list = async (req, res) => {
     const { page = 1, limit = 50, search = '' } = req.query
     const offset = (page - 1) * limit
     
-    let query = db('users')
-      .select('id', 'name', 'email', 'profile', 'active', 'last_login', 'created_at')
-      .orderBy('name', 'asc')
+    // Base query para filtros
+    let baseQuery = db('users')
     
     // Filtro de busca
     if (search) {
-      query = query.where(function() {
+      baseQuery = baseQuery.where(function() {
         this.where('name', 'like', `%${search}%`)
           .orWhere('email', 'like', `%${search}%`)
       })
     }
     
-    // Contar total
-    const [{ count }] = await query.clone().count('* as count')
+    // Contar total (sem select de colunas)
+    const [{ count }] = await baseQuery.clone().count('* as count')
     
-    // Buscar com paginação
-    const users = await query.limit(limit).offset(offset)
+    // Buscar usuários com paginação
+    const users = await baseQuery
+      .clone()
+      .select('id', 'name', 'email', 'profile', 'active', 'last_login', 'created_at')
+      .orderBy('name', 'asc')
+      .limit(limit)
+      .offset(offset)
     
     res.json({
       data: users,
