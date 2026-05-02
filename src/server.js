@@ -37,7 +37,8 @@ const corsOptions = {
       'http://sistema.portalupiparfum.com.br',
       'https://sistema.portalupiparfum.com.br',
       'http://api.sistema.portalupiparfum.com.br',
-      'https://api.sistema.portalupiparfum.com.br'
+      'https://api.sistema.portalupiparfum.com.br',
+      'http://ivxgd3e9ile1ugs25tqpka0e.187.77.227.96.sslip.io'
     ]
     
     // Permitir requisições sem origin (como Postman) ou de origens permitidas
@@ -49,7 +50,16 @@ const corsOptions = {
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With', 
+    'Accept',
+    'Cache-Control',
+    'Pragma',
+    'Expires'
+  ],
+  exposedHeaders: ['Cache-Control', 'Pragma', 'Expires'],
   credentials: true,
   optionsSuccessStatus: 204,
   preflightContinue: false
