@@ -2,6 +2,8 @@ const express = require('express')
 const cors    = require('cors')
 const path    = require('path')
 
+const authRoutes      = require('./routes/auth')
+const usersRoutes     = require('./routes/users')
 const suppliesRoutes  = require('./routes/insumos')
 const suppliersRoutes = require('./routes/fornecedores')
 const customersRoutes = require('./routes/clientes')
@@ -103,6 +105,11 @@ console.log('🔍 userPermissionsRoutes:', typeof userPermissionsRoutes)
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 try {
+  // Autenticação (rotas públicas)
+  app.use('/api/auth',      authRoutes)
+  
+  // Rotas protegidas
+  app.use('/api/users',     usersRoutes)
   app.use('/api/supplies',  suppliesRoutes)
   app.use('/api/suppliers', suppliersRoutes)
   app.use('/api/customers', customersRoutes)
