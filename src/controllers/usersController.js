@@ -119,12 +119,13 @@ exports.create = async (req, res) => {
       email,
       password_hash: passwordHash,
       profile,
-      active: true
+      active: true,
+      must_change_password: true // Forçar troca de senha no primeiro login
     })
     
     // Buscar usuário criado
     const newUser = await db('users')
-      .select('id', 'name', 'email', 'profile', 'active', 'created_at')
+      .select('id', 'name', 'email', 'profile', 'active', 'must_change_password', 'created_at')
       .where({ id })
       .first()
     

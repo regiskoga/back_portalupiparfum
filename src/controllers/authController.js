@@ -74,10 +74,12 @@ exports.login = async (req, res) => {
         id: user.id,
         name: user.name,
         email: user.email,
-        profile: user.profile
+        profile: user.profile,
+        must_change_password: user.must_change_password || false
       },
       permissions,
-      expiresAt
+      expiresAt,
+      must_change_password: user.must_change_password || false
     })
     
   } catch (error) {
@@ -157,17 +159,17 @@ exports.verifySession = async (req, res) => {
 }
 
 /**
- * Alterar senha
+ * Alterar senha (com suporte para primeiro login)
  */
 exports.changePassword = async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body
+    const { currentPassword, newPassword, isFirstLogin } = req.body
     const userId = req.user.id // Vem do middleware de autenticação
     
     // Validar campos
-    if (!currentPassword || !newPassword) {
+    if (!newPassword) {
       return res.status(400).json({ 
-        error: 'Senha atual e nova senha são obrigatórias' 
+        error: 'Nova senha é obrigatória' 
       })
     }
     
@@ -180,21 +182,31 @@ exports.changePassword = async (req, res) => {
     // Buscar usuário
     const user = await db('users').where({ id: userId }).first()
     
-    // Verificar senha atual
-    const passwordMatch = await bcrypt.compare(currentPassword, user.password_hash)
-    
-    if (!passwordMatch) {
-      return res.status(401).json({ error: 'Senha atual incorreta' })
+    // Se não for primeiro login, verificar senha atual
+    if (!isFirstLogin) {
+      if (!currentPassword) {
+        return res.status(400).json({ 
+          error: 'Senha atual é obrigatória' 
+        })
+      }
+      
+      const passwordMatch = await bcrypt.compare(currentPassword, user.password_hash)
+      
+      if (!passwordMatch) {
+        return res.status(401).json({ error: 'Senha atual incorreta' })
+      }
     }
     
     // Hash da nova senha
     const newPasswordHash = await bcrypt.hash(newPassword, 10)
     
-    // Atualizar senha
+    // Atualizar senha e remover flag de troca obrigatória
     await db('users')
       .where({ id: userId })
       .update({ 
         password_hash: newPasswordHash,
+        must_change_password: false,
+        password_changed_at: db.fn.now(),
         updated_at: db.fn.now()
       })
     
