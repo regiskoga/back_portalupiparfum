@@ -139,17 +139,17 @@ exports.create = async (req, res) => {
       must_change_password: true
     }
     console.log('💾 Dados a inserir:', JSON.stringify(userData, null, 2))
-    
-    const [id] = await db('users').insert(userData)
-    console.log('✅ Usuário inserido com ID:', id)
-    
-    // Buscar usuário criado
+
+    await db('users').insert(userData)
+    console.log('✅ Usuário inserido')
+
+    // Buscar usuário criado pelo email (compatível com PostgreSQL e SQLite)
     console.log('🔍 Buscando usuário criado...')
     const newUser = await db('users')
       .select('id', 'name', 'email', 'profile', 'active', 'must_change_password', 'created_at')
-      .where({ id })
+      .where({ email })
       .first()
-    
+
     console.log('✅ Usuário criado com sucesso:', newUser)
     res.status(201).json(newUser)
     
