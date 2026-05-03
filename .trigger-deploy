@@ -1,3 +1,3 @@
 # Arquivo para forçar deploy
-# Data: 2026-05-02
-# Motivo: Forçar deploy do backend com controllers de usuários
+# Data: 2026-05-03
+# Motivo: Forçar deploy com migration de troca obrigatória de senha (must_change_password)
