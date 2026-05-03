@@ -76,10 +76,14 @@ exports.getById = async (req, res) => {
  */
 exports.create = async (req, res) => {
   try {
+    console.log('📝 Iniciando criação de usuário...')
+    console.log('📝 Body recebido:', JSON.stringify(req.body, null, 2))
+    
     const { name, email, password, profile } = req.body
     
     // Validar campos
     if (!name || !email || !password || !profile) {
+      console.log('❌ Validação falhou: campos obrigatórios faltando')
       return res.status(400).json({ 
         error: 'Nome, email, senha e perfil são obrigatórios' 
       })
@@ -88,11 +92,13 @@ exports.create = async (req, res) => {
     // Validar email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
     if (!emailRegex.test(email)) {
+      console.log('❌ Validação falhou: email inválido')
       return res.status(400).json({ error: 'Email inválido' })
     }
     
     // Validar senha
     if (password.length < 6) {
+      console.log('❌ Validação falhou: senha muito curta')
       return res.status(400).json({ 
         error: 'A senha deve ter no mínimo 6 caracteres' 
       })
@@ -101,34 +107,50 @@ exports.create = async (req, res) => {
     // Validar perfil
     const validProfiles = ['ADM', 'GERENTE', 'OPERADOR', 'VISUALIZADOR']
     if (!validProfiles.includes(profile)) {
+      console.log('❌ Validação falhou: perfil inválido')
       return res.status(400).json({ error: 'Perfil inválido' })
     }
     
+    console.log('✅ Validações passaram')
+    
     // Verificar se email já existe
+    console.log('🔍 Verificando se email já existe...')
     const existingUser = await db('users').where({ email }).first()
     if (existingUser) {
+      console.log('❌ Email já cadastrado')
       return res.status(409).json({ error: 'Email já cadastrado' })
     }
     
+    console.log('✅ Email disponível')
+    
     // Hash da senha
+    console.log('🔐 Gerando hash da senha...')
     const passwordHash = await bcrypt.hash(password, 10)
+    console.log('✅ Hash gerado')
     
     // Inserir usuário
-    const [id] = await db('users').insert({
+    console.log('💾 Inserindo usuário no banco...')
+    const userData = {
       name,
       email,
       password_hash: passwordHash,
       profile,
       active: true,
-      must_change_password: true // Forçar troca de senha no primeiro login
-    })
+      must_change_password: true
+    }
+    console.log('💾 Dados a inserir:', JSON.stringify(userData, null, 2))
+    
+    const [id] = await db('users').insert(userData)
+    console.log('✅ Usuário inserido com ID:', id)
     
     // Buscar usuário criado
+    console.log('🔍 Buscando usuário criado...')
     const newUser = await db('users')
       .select('id', 'name', 'email', 'profile', 'active', 'must_change_password', 'created_at')
       .where({ id })
       .first()
     
+    console.log('✅ Usuário criado com sucesso:', newUser)
     res.status(201).json(newUser)
     
   } catch (error) {
