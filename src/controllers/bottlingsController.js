@@ -467,6 +467,13 @@ async function stats(req, res) {
 // ─── GET AVAILABLE BATCHES ───────────────────────────────────────────────────
 async function getAvailableBatches(req, res) {
   try {
+    // Auto-atualizar lotes que completaram a maceração mas o status ainda não foi atualizado
+    await db('batches')
+      .where('status', 'Em maceração')
+      .where('maceration_end', '<=', db.fn.now())
+      .where('active', true)
+      .update({ status: 'Pronto para envase', updated_at: db.fn.now() })
+
     const batches = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
       .join('products as p', 'p.id', 'f.product_id')
@@ -483,7 +490,7 @@ async function getAvailableBatches(req, res) {
       .where('b.remaining_ml', '>', 0)
       .where('b.active', true)
       .orderBy('b.production_date', 'asc') // FIFO
-    
+
     res.json(batches)
   } catch (error) {
     res.status(500).json({ error: error.message })
