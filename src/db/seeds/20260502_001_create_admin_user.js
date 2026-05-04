@@ -6,14 +6,17 @@
 const bcrypt = require('bcrypt')
 
 exports.seed = async function(knex) {
-  // Limpar tabelas (apenas em desenvolvimento)
-  await knex('sessions').del()
-  await knex('users').del()
-  
+  // Verificar se já existe o usuário ADM para não sobrescrever dados em produção
+  const existing = await knex('users').where({ email: 'euclidesbarbosa2001@gmail.com' }).first()
+
+  if (existing) {
+    console.log('ℹ️  Usuário ADM já existe — seed ignorado para preservar dados.')
+    return
+  }
+
   // Hash da senha padrão: "admin123"
   const passwordHash = await bcrypt.hash('admin123', 10)
-  
-  // Inserir usuário ADM
+
   await knex('users').insert([
     {
       id: 1,
@@ -26,7 +29,7 @@ exports.seed = async function(knex) {
       updated_at: knex.fn.now()
     }
   ])
-  
+
   console.log('✅ Usuário ADM criado com sucesso!')
   console.log('📧 Email: euclidesbarbosa2001@gmail.com')
   console.log('🔑 Senha: admin123')

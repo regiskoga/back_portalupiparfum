@@ -1,5 +1,4 @@
 const express = require('express')
-const cors    = require('cors')
 const path    = require('path')
 
 const authRoutes      = require('./routes/auth')
@@ -30,44 +29,29 @@ const app  = express()
 const PORT = process.env.PORT || 3001
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
-// CORS configurado para aceitar requisições do frontend
-const corsOptions = {
-  origin: function (origin, callback) {
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://127.0.0.1:3000',
-      'http://sistema.portalupiparfum.com.br',
-      'https://sistema.portalupiparfum.com.br',
-      'http://api.sistema.portalupiparfum.com.br',
-      'https://api.sistema.portalupiparfum.com.br',
-      'http://ivxgd3e9ile1ugs25tqpka0e.187.77.227.96.sslip.io'
-    ]
-    
-    // Permitir requisições sem origin (como Postman) ou de origens permitidas
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true)
-    } else {
-      console.log(`❌ CORS bloqueado para origem: ${origin}`)
-      callback(new Error('Not allowed by CORS'))
-    }
-  },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: [
-    'Content-Type', 
-    'Authorization', 
-    'X-Requested-With', 
-    'Accept',
-    'Cache-Control',
-    'Pragma',
-    'Expires'
-  ],
-  exposedHeaders: ['Cache-Control', 'Pragma', 'Expires'],
-  credentials: true,
-  optionsSuccessStatus: 204,
-  preflightContinue: false
-}
+// CORS explícito — funciona mesmo atrás de reverse proxy (Traefik/Nginx)
+const ALLOWED_ORIGINS = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://sistema.portalupiparfum.com.br',
+  'https://sistema.portalupiparfum.com.br',
+  'http://api.sistema.portalupiparfum.com.br',
+  'https://api.sistema.portalupiparfum.com.br',
+  'http://ivxgd3e9ile1ugs25tqpka0e.187.77.227.96.sslip.io'
+]
 
-app.use(cors(corsOptions))
+app.use((req, res, next) => {
+  const origin = req.get('Origin')
+  if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+    res.set('Access-Control-Allow-Origin', origin || '*')
+    res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
+    res.set('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept,Cache-Control,Pragma,Expires')
+    res.set('Access-Control-Allow-Credentials', 'true')
+    res.set('Access-Control-Max-Age', '86400')
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204)
+  next()
+})
 
 // Debug CORS detalhado
 app.use((req, res, next) => {
@@ -154,11 +138,6 @@ app.get('/api/cors-test', (_req, res) => {
     origin: _req.get('Origin') || 'no-origin',
     host: _req.get('Host')
   })
-})
-
-// OPTIONS handler explícito para todas as rotas /api/*
-app.options('/api/*', (_req, res) => {
-  res.sendStatus(204)
 })
 
 // 404
