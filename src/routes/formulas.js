@@ -17,6 +17,7 @@ router.get('/:id', [param('id').isInt()], validate, ctrl.getOne)
 router.get('/:id/items', [param('id').isInt()], validate, ctrl.getItems)
 router.post('/', formulaRules, validate, ctrl.create)
 router.put('/:id', [param('id').isInt(), ...formulaRules.slice(1)], validate, ctrl.update) // Remove product_id requirement for update
+router.patch('/:id', [param('id').isInt(), ...formulaRules.slice(1)], validate, ctrl.update)
 router.delete('/:id', [param('id').isInt()], validate, ctrl.remove)
 router.post('/:id/validate', [param('id').isInt()], validate, ctrl.validate)
 

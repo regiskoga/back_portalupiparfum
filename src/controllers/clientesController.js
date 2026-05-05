@@ -115,7 +115,7 @@ async function create (req, res) {
   try {
     const { name, tax_id = '', phone = '', email = '', address = '', city = '', state = '', zip_code = '', notes = '' } = req.body
 
-    const [id] = await db('customers').insert({
+    const [result] = await db('customers').insert({
       name,
       tax_id,
       phone,
@@ -127,7 +127,7 @@ async function create (req, res) {
       notes
     }).returning('*')
 
-    const customer = await customerWithStats(id)
+    const customer = await customerWithStats(result.id)
     res.status(201).json(customer)
   } catch (e) {
     res.status(400).json({ error: e.message })
@@ -313,7 +313,7 @@ async function createOrder (req, res) {
 
     // Use transaction
     const orderId = await db.transaction(async (trx) => {
-      const [id] = await trx('orders').insert({
+      const [order] = await trx('orders').insert({
         customer_id: req.params.id,
         code,
         status,
@@ -325,7 +325,7 @@ async function createOrder (req, res) {
 
       // Insert items
       const itemsData = items.map(item => ({
-        order_id: id,
+        order_id: order.id,
         product_name: item.product_name,
         product_ref: item.product_ref || '',
         quantity: Number(item.quantity),
@@ -334,7 +334,7 @@ async function createOrder (req, res) {
 
       await trx('order_items').insert(itemsData)
 
-      return id
+      return order.id
     })
 
     const order = await completeOrder(orderId)

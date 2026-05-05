@@ -53,7 +53,7 @@ async function create (req, res) {
   try {
     const { name, tax_id = '', contact = '', email = '', phone = '', address = '', notes = '', type = '' } = req.body
 
-    const [id] = await db('suppliers').insert({
+    const [created] = await db('suppliers').insert({
       name,
       tax_id,
       contact,
@@ -64,8 +64,7 @@ async function create (req, res) {
       type
     }).returning('*')
 
-    const supplier = await db('suppliers').where({ id }).first()
-    res.status(201).json(supplier)
+    res.status(201).json(created)
   } catch (e) {
     res.status(400).json({ error: e.message })
   }
