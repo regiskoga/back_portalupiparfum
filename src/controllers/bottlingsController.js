@@ -474,6 +474,8 @@ async function getAvailableBatches(req, res) {
       .where('active', true)
       .update({ status: 'Pronto para envase', updated_at: db.fn.now() })
 
+    // Retorna lotes prontos para envase E em maceração (para que o frontend
+    // possa exibi-los como desabilitados, informando quando estarão disponíveis)
     const batches = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
       .join('products as p', 'p.id', 'f.product_id')
@@ -483,13 +485,16 @@ async function getAvailableBatches(req, res) {
         'b.remaining_ml',
         'b.cost_per_ml',
         'b.production_date',
+        'b.status',
+        'b.maceration_end',
         'f.name as formula_name',
         'p.project_name'
       )
-      .where('b.status', 'Pronto para envase')
+      .whereIn('b.status', ['Pronto para envase', 'Em maceração'])
       .where('b.remaining_ml', '>', 0)
       .where('b.active', true)
-      .orderBy('b.production_date', 'asc') // FIFO
+      .orderByRaw("CASE WHEN b.status = 'Pronto para envase' THEN 0 ELSE 1 END")
+      .orderBy('b.production_date', 'asc')
 
     res.json(batches)
   } catch (error) {
