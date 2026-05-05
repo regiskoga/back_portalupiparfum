@@ -151,7 +151,7 @@ app.use((err, _req, res, _next) => {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`\n🌸 Parfumerie API running on http://localhost:${PORT}`)
+  console.log(`\n🌸 Perfumaria API running on http://localhost:${PORT}`)
   console.log(`   Available endpoints:`)
   console.log(`   GET  /api/supplies`)
   console.log(`   POST /api/supplies`)
