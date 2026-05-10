@@ -1,5 +1,10 @@
 const { db } = require('../models/db')
 
+function classifyPurchase (row) {
+  if (row.ideal_unit_price == null || Number(row.ideal_unit_price) === 0) return 'SEM_REFERENCIA'
+  return Number(row.unit_cost) <= Number(row.ideal_unit_price) ? 'BOA' : 'NAO_BOA'
+}
+
 // ─── LIST ─────────────────────────────────────────────────────────────────────
 async function list (req, res) {
   try {
@@ -36,11 +41,13 @@ async function list (req, res) {
       .limit(Number(limit))
       .offset(offset)
 
-    res.json({ 
-      data: rows, 
-      total: Number(total), 
-      page: Number(page), 
-      limit: Number(limit) 
+    const data = rows.map(r => ({ ...r, purchase_classification: classifyPurchase(r) }))
+
+    res.json({
+      data,
+      total: Number(total),
+      page: Number(page),
+      limit: Number(limit)
     })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -58,7 +65,7 @@ async function getOne (req, res) {
       return res.status(404).json({ error: 'Supply not found' })
     }
 
-    res.json(supply)
+    res.json({ ...supply, purchase_classification: classifyPurchase(supply) })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -68,7 +75,7 @@ async function getOne (req, res) {
 async function create (req, res) {
   console.log('🔍 CREATE - Iniciando...')
   try {
-    const { name, type, supplier_id, unit, quantity_purchased, total_amount_paid, batch = '', notes = '' } = req.body
+    const { name, type, supplier_id, unit, quantity_purchased, total_amount_paid, batch = '', notes = '', ideal_unit_price } = req.body
     console.log('🔍 CREATE - Dados recebidos:', { name, type, supplier_id })
 
     // Verify supplier exists
@@ -90,7 +97,8 @@ async function create (req, res) {
       quantity_purchased: Number(quantity_purchased),
       total_amount_paid: Number(total_amount_paid),
       batch,
-      notes
+      notes,
+      ideal_unit_price: ideal_unit_price != null && ideal_unit_price !== '' ? Number(ideal_unit_price) : null,
     }
 
     const result = await db('supplies').insert(insertData).returning('*')
@@ -114,7 +122,7 @@ async function update (req, res) {
       return res.status(404).json({ error: 'Supply not found' })
     }
 
-    const { name, type, supplier_id, unit, quantity_purchased, total_amount_paid, batch, notes } = req.body
+    const { name, type, supplier_id, unit, quantity_purchased, total_amount_paid, batch, notes, ideal_unit_price } = req.body
 
     // Verify supplier exists if changing
     if (supplier_id) {
@@ -133,6 +141,7 @@ async function update (req, res) {
     if (total_amount_paid !== undefined) updateData.total_amount_paid = Number(total_amount_paid)
     if (batch !== undefined) updateData.batch = batch
     if (notes !== undefined) updateData.notes = notes
+    if (ideal_unit_price !== undefined) updateData.ideal_unit_price = ideal_unit_price !== null && ideal_unit_price !== '' ? Number(ideal_unit_price) : null
     updateData.updated_at = db.fn.now()
 
     await db('supplies').where({ id: parseInt(req.params.id) }).update(updateData)
@@ -143,7 +152,7 @@ async function update (req, res) {
       .where('s.id', parseInt(req.params.id))
       .first()
 
-    res.json(updated)
+    res.json({ ...updated, purchase_classification: classifyPurchase(updated) })
   } catch (e) {
     res.status(400).json({ error: e.message })
   }
