@@ -23,7 +23,8 @@ const traceabilityRoutes = require('./routes/traceability')
 const customerGiftsRoutes = require('./routes/customerGifts')
 const systemRulesRoutes = require('./routes/systemRules')
 const userPermissionsRoutes = require('./routes/userPermissions')
-const migrationsRoutes = require('./routes/migrations')
+const migrationsRoutes   = require('./routes/migrations')
+const parametersRoutes   = require('./routes/parameters')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
@@ -114,7 +115,8 @@ try {
   app.use('/api/customer-gifts', customerGiftsRoutes)
   app.use('/api/system-rules', systemRulesRoutes)
   app.use('/api/user-permissions', userPermissionsRoutes)
-  app.use('/api/migrations', migrationsRoutes)
+  app.use('/api/migrations',  migrationsRoutes)
+  app.use('/api/parameters',  parametersRoutes)
   
   console.log('✅ Todas as rotas carregadas com sucesso')
 } catch (routeError) {

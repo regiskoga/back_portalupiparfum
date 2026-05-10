@@ -1,6 +1,11 @@
 const { db } = require('../models/db')
 const ActivityLogger = require('../services/activityLogger')
 
+async function getParam (key, defaultValue) {
+  const row = await db('parameters').where('key', key).first()
+  return row ? row.value : String(defaultValue)
+}
+
 // ─── GENERATE BATCH CODE ──────────────────────────────────────────────────────
 async function generateBatchCode () {
   const today = new Date()
@@ -175,8 +180,9 @@ async function create(req, res) {
     const costPerMl = totalCost / parseFloat(quantity_ml)
 
     // Datas de maceração
+    const macerationDays = parseInt(await getParam('maceration_days', 10))
     const macerationStart = start_maceration ? new Date(production_date) : null
-    const macerationEnd = start_maceration ? new Date(new Date(production_date).getTime() + (10 * 24 * 60 * 60 * 1000)) : null
+    const macerationEnd = start_maceration ? new Date(new Date(production_date).getTime() + (macerationDays * 24 * 60 * 60 * 1000)) : null
 
     const result = await db.transaction(async (trx) => {
       // Criar lote
@@ -339,8 +345,9 @@ async function startMaceration(req, res) {
       return res.status(400).json({ error: 'Maceration already started' })
     }
     
+    const macerationDays = parseInt(await getParam('maceration_days', 10))
     const macerationStart = new Date()
-    const macerationEnd = new Date(macerationStart.getTime() + (10 * 24 * 60 * 60 * 1000)) // 10 dias
+    const macerationEnd = new Date(macerationStart.getTime() + (macerationDays * 24 * 60 * 60 * 1000))
     
     const [updated] = await db('batches')
       .where('id', parseInt(req.params.id))
@@ -359,7 +366,7 @@ async function startMaceration(req, res) {
       quantity_ml: 0,
       previous_ml: parseFloat(batch.remaining_ml),
       current_ml: parseFloat(batch.remaining_ml),
-      notes: 'Início da maceração (10 dias)',
+      notes: `Início da maceração (${macerationDays} dias)`,
       operator: 'system'
     })
     

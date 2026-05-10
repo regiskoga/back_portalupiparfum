@@ -1,6 +1,11 @@
 const { db } = require('../models/db')
 const ActivityLogger = require('../services/activityLogger')
 
+async function getParam (key, defaultValue) {
+  const row = await db('parameters').where('key', key).first()
+  return row ? row.value : String(defaultValue)
+}
+
 // ─── GENERATE BOTTLING CODE ───────────────────────────────────────────────────
 async function generateBottlingCode () {
   const today = new Date()
@@ -132,11 +137,12 @@ async function create(req, res) {
     } = req.body
 
     const bottling_code = providedCode && providedCode.trim() ? providedCode.trim() : await generateBottlingCode()
+    const chorinhoPct = parseFloat(await getParam('chorinho_tolerance_pct', 5)) / 100
 
-    // Validar se há lotes suficientes (tolerância de 5% de chorinho)
+    // Validar se há lotes suficientes
     const totalMlNeeded = parseFloat(volume_ml) * parseInt(quantity)
     const totalMlProvided = batches.reduce((sum, b) => sum + parseFloat(b.ml_used), 0)
-    const tolerance = totalMlNeeded * 0.05
+    const tolerance = totalMlNeeded * chorinhoPct
     if (totalMlProvided < totalMlNeeded || totalMlProvided > (totalMlNeeded + tolerance)) {
       return res.status(400).json({
         error: `ML total não confere. Necessário: ${totalMlNeeded}ml, Fornecido: ${totalMlProvided}ml (tolerância: +${tolerance.toFixed(2)}ml)`
@@ -153,7 +159,7 @@ async function create(req, res) {
 
         const mlRequested = parseFloat(batchData.ml_used)
         const mlAvailable = parseFloat(batch.remaining_ml)
-        const tolerance = mlAvailable * 0.05
+        const tolerance = mlAvailable * chorinhoPct
         const maxAllowed = mlAvailable + tolerance
         
         // Verificar se excede o máximo permitido (com tolerância)
