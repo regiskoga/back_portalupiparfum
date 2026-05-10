@@ -25,6 +25,7 @@ const systemRulesRoutes = require('./routes/systemRules')
 const userPermissionsRoutes = require('./routes/userPermissions')
 const migrationsRoutes   = require('./routes/migrations')
 const parametersRoutes   = require('./routes/parameters')
+const priceListsRoutes   = require('./routes/priceLists')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
@@ -117,6 +118,7 @@ try {
   app.use('/api/user-permissions', userPermissionsRoutes)
   app.use('/api/migrations',  migrationsRoutes)
   app.use('/api/parameters',  parametersRoutes)
+  app.use('/api/price-lists', priceListsRoutes)
   
   console.log('✅ Todas as rotas carregadas com sucesso')
 } catch (routeError) {
