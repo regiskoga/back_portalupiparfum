@@ -8,6 +8,8 @@ exports.seed = async function(knex) {
   try {
     // Limpar tabelas (ordem reversa por causa das FKs)
     await knex('batch_movements').del()
+    await knex('bottling_batches').del()
+    await knex('bottling_orders').del()
     await knex('batches').del()
     await knex('formula_items').del()
     await knex('formulas').del()
