@@ -1,6 +1,17 @@
 const { db } = require('../models/db')
 const ActivityLogger = require('../services/activityLogger')
 
+// ─── GENERATE BOTTLING CODE ───────────────────────────────────────────────────
+async function generateBottlingCode () {
+  const today = new Date()
+  const yy = String(today.getFullYear()).slice(2)
+  const mm = String(today.getMonth() + 1).padStart(2, '0')
+  const dd = String(today.getDate()).padStart(2, '0')
+  const prefix = `ENV${yy}${mm}${dd}`
+  const { cnt } = await db('bottlings').where('bottling_code', 'like', `${prefix}%`).count('* as cnt').first()
+  return `${prefix}-${String(parseInt(cnt) + 1).padStart(3, '0')}`
+}
+
 // ─── LIST BOTTLINGS ───────────────────────────────────────────────────────────
 async function list(req, res) {
   try {
@@ -108,7 +119,7 @@ async function getOne(req, res) {
 async function create(req, res) {
   try {
     const {
-      bottling_code,
+      bottling_code: providedCode,
       bottling_date,
       product_name,
       product_ref = '',
@@ -116,22 +127,22 @@ async function create(req, res) {
       quantity,
       bottle_supply_id = null,
       label_supply_id = null,
-      batches = [], // Array de { batch_id, ml_used }
+      batches = [],
       notes = ''
     } = req.body
-    
-    // Validar se há lotes suficientes
+
+    const bottling_code = providedCode && providedCode.trim() ? providedCode.trim() : await generateBottlingCode()
+
+    // Validar se há lotes suficientes (tolerância de 5% de chorinho)
     const totalMlNeeded = parseFloat(volume_ml) * parseInt(quantity)
     const totalMlProvided = batches.reduce((sum, b) => sum + parseFloat(b.ml_used), 0)
-    
-    // Permitir até 5% de "chorinho" (tolerância)
     const tolerance = totalMlNeeded * 0.05
     if (totalMlProvided < totalMlNeeded || totalMlProvided > (totalMlNeeded + tolerance)) {
-      return res.status(400).json({ 
-        error: `ML total não confere. Necessário: ${totalMlNeeded}ml, Fornecido: ${totalMlProvided}ml (tolerância: +${tolerance.toFixed(2)}ml)` 
+      return res.status(400).json({
+        error: `ML total não confere. Necessário: ${totalMlNeeded}ml, Fornecido: ${totalMlProvided}ml (tolerância: +${tolerance.toFixed(2)}ml)`
       })
     }
-    
+
     const result = await db.transaction(async (trx) => {
       // Verificar disponibilidade dos lotes
       for (const batchData of batches) {
@@ -139,46 +150,10 @@ async function create(req, res) {
         if (!batch) {
           throw new Error(`Lote ${batchData.batch_id} não encontrado`)
         }
-        
-        // ═══════════════════════════════════════════════════════════════
-        // 🔒 VALIDAÇÃO DE MACERAÇÃO - BLOQUEIO CRÍTICO
-        // ═══════════════════════════════════════════════════════════════
-        // Regra: Nunca permitir envase antes da data de liberação
-        // Tempo fixo: 10 dias corridos
-        // ═══════════════════════════════════════════════════════════════
-        if (batch.status === 'Em maceração' && batch.maceration_end) {
-          const today = new Date()
-          today.setHours(0, 0, 0, 0) // Zerar horas para comparação de datas
-          
-          const endDate = new Date(batch.maceration_end)
-          endDate.setHours(0, 0, 0, 0)
-          
-          if (today < endDate) {
-            const daysRemaining = Math.ceil((endDate - today) / (1000 * 60 * 60 * 24))
-            const startDate = new Date(batch.maceration_start)
-            const totalDays = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24))
-            const daysElapsed = totalDays - daysRemaining
-            
-            throw new Error(
-              `🔒 ENVASE BLOQUEADO: Lote ${batch.batch_code} ainda está em maceração.\n\n` +
-              `📅 Data de início: ${startDate.toLocaleDateString('pt-BR')}\n` +
-              `📅 Data de liberação: ${endDate.toLocaleDateString('pt-BR')}\n` +
-              `⏳ Progresso: ${daysElapsed}/${totalDays} dias (${Math.round(daysElapsed/totalDays*100)}%)\n` +
-              `⏱️  Faltam ${daysRemaining} dia(s) para liberação\n\n` +
-              `❌ O sistema não permite envase antes da data de liberação.`
-            )
-          }
-        }
-        
-        // ═══════════════════════════════════════════════════════════════
-        // 🍷 VALIDAÇÃO DO "CHORINHO" - TOLERÂNCIA DE 5%
-        // ═══════════════════════════════════════════════════════════════
-        // Regra: Pequenas variações de volume são naturais (ex: 200ml pode render 205ml)
-        // O sistema permite usar até 5% acima do volume registrado sem gerar estoque negativo
-        // ═══════════════════════════════════════════════════════════════
+
         const mlRequested = parseFloat(batchData.ml_used)
         const mlAvailable = parseFloat(batch.remaining_ml)
-        const tolerance = mlAvailable * 0.05 // 5% de tolerância
+        const tolerance = mlAvailable * 0.05
         const maxAllowed = mlAvailable + tolerance
         
         // Verificar se excede o máximo permitido (com tolerância)
@@ -474,8 +449,7 @@ async function getAvailableBatches(req, res) {
       .where('active', true)
       .update({ status: 'Pronto para envase', updated_at: db.fn.now() })
 
-    // Retorna lotes prontos para envase E em maceração (para que o frontend
-    // possa exibi-los como desabilitados, informando quando estarão disponíveis)
+    // Retorna todos os lotes com ML disponível (exceto Finalizados)
     const batches = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
       .join('products as p', 'p.id', 'f.product_id')
@@ -490,10 +464,10 @@ async function getAvailableBatches(req, res) {
         'f.name as formula_name',
         'p.project_name'
       )
-      .whereIn('b.status', ['Pronto para envase', 'Em maceração'])
+      .whereNot('b.status', 'Finalizado')
       .where('b.remaining_ml', '>', 0)
       .where('b.active', true)
-      .orderByRaw("CASE WHEN b.status = 'Pronto para envase' THEN 0 ELSE 1 END")
+      .orderByRaw("CASE WHEN b.status = 'Pronto para envase' THEN 0 WHEN b.status = 'Em maceração' THEN 1 ELSE 2 END")
       .orderBy('b.production_date', 'asc')
 
     res.json(batches)

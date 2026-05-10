@@ -4,7 +4,7 @@ const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
 
 const bottlingRules = [
-  body('bottling_code').trim().notEmpty().withMessage('Bottling code is required'),
+  body('bottling_code').optional().trim(),
   body('bottling_date').isISO8601().withMessage('Valid bottling date is required'),
   body('product_name').trim().notEmpty().withMessage('Product name is required'),
   body('product_ref').optional().trim(),
