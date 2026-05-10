@@ -1,6 +1,23 @@
 const { db } = require('../models/db')
 const ActivityLogger = require('../services/activityLogger')
 
+// ─── GENERATE BATCH CODE ──────────────────────────────────────────────────────
+async function generateBatchCode () {
+  const today = new Date()
+  const yy = String(today.getFullYear()).slice(2)
+  const mm = String(today.getMonth() + 1).padStart(2, '0')
+  const dd = String(today.getDate()).padStart(2, '0')
+  const prefix = `L${yy}${mm}${dd}`
+
+  const { cnt } = await db('batches')
+    .where('batch_code', 'like', `${prefix}%`)
+    .count('* as cnt')
+    .first()
+
+  const seq = String(parseInt(cnt) + 1).padStart(3, '0')
+  return `${prefix}-${seq}`
+}
+
 // ─── LIST BATCHES ─────────────────────────────────────────────────────────────
 async function list(req, res) {
   try {
@@ -124,41 +141,43 @@ async function create(req, res) {
   try {
     const {
       formula_id,
-      batch_code,
+      batch_code: providedCode,
       production_date,
       quantity_ml,
       notes = '',
       start_maceration = true
     } = req.body
-    
+
     // Verificar se fórmula existe e está validada
     const formula = await db('formulas').where('id', parseInt(formula_id)).first()
     if (!formula) {
       return res.status(400).json({ error: 'Formula not found' })
     }
-    
+
     if (!formula.validated) {
       return res.status(400).json({ error: 'Formula must be validated before creating batch' })
     }
-    
+
+    const batch_code = providedCode && providedCode.trim() ? providedCode.trim() : await generateBatchCode()
+
     // Buscar itens da fórmula para calcular custo
     const formulaItems = await db('formula_items as fi')
       .join('supplies as s', 's.id', 'fi.supply_id')
       .select('fi.percentage', 's.unit_cost')
       .where('fi.formula_id', parseInt(formula_id))
-    
+
     // Calcular custo total do lote
     const totalCost = formulaItems.reduce((sum, item) => {
       const itemCostPerMl = (parseFloat(item.unit_cost) * parseFloat(item.percentage)) / 100
       return sum + (itemCostPerMl * parseFloat(quantity_ml))
     }, 0)
-    
+
     const costPerMl = totalCost / parseFloat(quantity_ml)
-    
+
     // Datas de maceração
     const macerationStart = start_maceration ? new Date(production_date) : null
     const macerationEnd = start_maceration ? new Date(new Date(production_date).getTime() + (10 * 24 * 60 * 60 * 1000)) : null
-    
+
     const result = await db.transaction(async (trx) => {
       // Criar lote
       const [batch] = await trx('batches').insert({
@@ -353,6 +372,110 @@ async function startMaceration(req, res) {
   }
 }
 
+// ─── FORMULA INFO (project + essence %) ──────────────────────────────────────
+async function formulaInfo (req, res) {
+  try {
+    const formula_id = parseInt(req.params.formula_id)
+    const formula = await db('formulas as f')
+      .join('products as p', 'p.id', 'f.product_id')
+      .select('f.id', 'f.name', 'p.project_name', 'p.commercial_name')
+      .where('f.id', formula_id)
+      .first()
+
+    if (!formula) return res.status(404).json({ error: 'Formula not found' })
+
+    const items = await db('formula_items as fi')
+      .join('supplies as s', 's.id', 'fi.supply_id')
+      .select('fi.percentage', 's.type')
+      .where('fi.formula_id', formula_id)
+
+    const essence_percentage = items
+      .filter(i => i.type === 'Essence')
+      .reduce((sum, i) => sum + parseFloat(i.percentage), 0)
+
+    res.json({ ...formula, essence_percentage })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
+// ─── MERGE BATCHES ────────────────────────────────────────────────────────────
+async function mergeBatches (req, res) {
+  try {
+    const { formula_id, batch_ids, notes = '' } = req.body
+
+    if (!Array.isArray(batch_ids) || batch_ids.length < 2) {
+      return res.status(400).json({ error: 'Selecione ao menos 2 lotes para unificar' })
+    }
+
+    const batches = await db('batches').whereIn('id', batch_ids)
+
+    if (batches.length !== batch_ids.length) {
+      return res.status(400).json({ error: 'Um ou mais lotes não encontrados' })
+    }
+
+    for (const b of batches) {
+      if (parseInt(b.formula_id) !== parseInt(formula_id)) {
+        return res.status(400).json({ error: 'Todos os lotes devem pertencer à mesma fórmula' })
+      }
+      if (b.status === 'Finalizado') {
+        return res.status(400).json({ error: `Lote ${b.batch_code} já está finalizado` })
+      }
+    }
+
+    const totalMl = batches.reduce((sum, b) => sum + parseFloat(b.remaining_ml), 0)
+
+    const formulaItems = await db('formula_items as fi')
+      .join('supplies as s', 's.id', 'fi.supply_id')
+      .select('fi.percentage', 's.unit_cost')
+      .where('fi.formula_id', parseInt(formula_id))
+
+    const totalCost = formulaItems.reduce((sum, item) => {
+      const perMl = (parseFloat(item.unit_cost) * parseFloat(item.percentage)) / 100
+      return sum + perMl * totalMl
+    }, 0)
+
+    const costPerMl = totalMl > 0 ? totalCost / totalMl : 0
+    const batch_code = await generateBatchCode()
+    const today = new Date().toISOString().slice(0, 10)
+
+    const result = await db.transaction(async (trx) => {
+      const [newBatch] = await trx('batches').insert({
+        formula_id: parseInt(formula_id),
+        batch_code,
+        production_date: today,
+        quantity_ml: totalMl,
+        remaining_ml: totalMl,
+        total_cost: totalCost,
+        cost_per_ml: costPerMl,
+        status: 'Pronto para envase',
+        notes: notes || `Unificação: ${batches.map(b => b.batch_code).join(', ')}`,
+        active: true
+      }).returning('*')
+
+      await trx('batch_movements').insert({
+        batch_id: newBatch.id,
+        movement_type: 'production',
+        quantity_ml: totalMl,
+        previous_ml: 0,
+        current_ml: totalMl,
+        notes: `Criado por unificação de: ${batches.map(b => b.batch_code).join(', ')}`,
+        operator: 'system'
+      })
+
+      await trx('batches')
+        .whereIn('id', batch_ids)
+        .update({ status: 'Finalizado', updated_at: db.fn.now() })
+
+      return newBatch
+    })
+
+    res.status(201).json(result)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
 module.exports = {
   list,
   getOne,
@@ -362,7 +485,9 @@ module.exports = {
   stats,
   startMaceration,
   canBeBottled,
-  updateMacerationStatus
+  updateMacerationStatus,
+  formulaInfo,
+  mergeBatches
 }
 
 

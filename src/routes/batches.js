@@ -7,7 +7,7 @@ const BATCH_STATUSES = ['Em maceração', 'Pronto para envase', 'Finalizado']
 
 const batchRules = [
   body('formula_id').isInt({ min: 1 }).withMessage('Valid formula_id is required'),
-  body('batch_code').trim().notEmpty().withMessage('Batch code is required'),
+  body('batch_code').optional().trim(),
   body('production_date').isISO8601().withMessage('Valid production date is required'),
   body('quantity_ml').isFloat({ gt: 0 }).withMessage('Quantity must be greater than 0'),
   body('notes').optional().trim(),
@@ -21,6 +21,9 @@ const updateBatchRules = [
 
 router.get('/', ctrl.list)
 router.get('/stats', ctrl.stats)
+router.get('/formula-info/:formula_id', [param('formula_id').isInt()], validate, ctrl.formulaInfo)
+router.post('/merge', ctrl.mergeBatches)
+router.post('/update-maceration-status', ctrl.updateMacerationStatus)
 router.get('/:id', [param('id').isInt()], validate, ctrl.getOne)
 router.get('/:id/can-bottle', [param('id').isInt()], validate, ctrl.canBeBottled)
 router.post('/', batchRules, validate, ctrl.create)
@@ -28,6 +31,5 @@ router.put('/:id', [param('id').isInt(), ...updateBatchRules], validate, ctrl.up
 router.patch('/:id', [param('id').isInt(), ...updateBatchRules], validate, ctrl.update)
 router.delete('/:id', [param('id').isInt()], validate, ctrl.remove)
 router.post('/:id/start-maceration', [param('id').isInt()], validate, ctrl.startMaceration)
-router.post('/update-maceration-status', ctrl.updateMacerationStatus)
 
 module.exports = router
