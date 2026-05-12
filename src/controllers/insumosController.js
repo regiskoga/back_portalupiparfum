@@ -103,6 +103,7 @@ async function create (req, res) {
       ideal_unit_price: ideal_unit_price != null && ideal_unit_price !== '' ? Number(ideal_unit_price) : null,
       purchase_date: purchase_date || new Date().toISOString().slice(0, 10),
       receipt_status: req.body.receipt_status || 'Recebido',
+      bottle_type: req.body.bottle_type || '',
     }
 
     const result = await db('supplies').insert(insertData).returning('*')
@@ -148,6 +149,7 @@ async function update (req, res) {
     if (ideal_unit_price !== undefined) updateData.ideal_unit_price = ideal_unit_price !== null && ideal_unit_price !== '' ? Number(ideal_unit_price) : null
     if (purchase_date !== undefined) updateData.purchase_date = purchase_date || null
     if (req.body.receipt_status !== undefined) updateData.receipt_status = req.body.receipt_status
+    if (req.body.bottle_type    !== undefined) updateData.bottle_type    = req.body.bottle_type
     updateData.updated_at = db.fn.now()
 
     await db('supplies').where({ id: parseInt(req.params.id) }).update(updateData)
