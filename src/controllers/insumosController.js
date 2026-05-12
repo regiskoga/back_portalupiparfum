@@ -21,6 +21,7 @@ async function list (req, res) {
     if (type) query = query.where('s.type', type)
     if (supplier_id) query = query.where('s.supplier_id', Number(supplier_id))
     if (busca) query = query.where('s.name', 'like', `%${busca}%`)
+    if (req.query.receipt_status) query = query.where('s.receipt_status', req.query.receipt_status)
 
     // Count total
     const countQuery = query.clone().clearSelect().clearOrder().count('* as total')
@@ -101,6 +102,7 @@ async function create (req, res) {
       notes,
       ideal_unit_price: ideal_unit_price != null && ideal_unit_price !== '' ? Number(ideal_unit_price) : null,
       purchase_date: purchase_date || new Date().toISOString().slice(0, 10),
+      receipt_status: req.body.receipt_status || 'Recebido',
     }
 
     const result = await db('supplies').insert(insertData).returning('*')
@@ -145,6 +147,7 @@ async function update (req, res) {
     if (notes !== undefined) updateData.notes = notes
     if (ideal_unit_price !== undefined) updateData.ideal_unit_price = ideal_unit_price !== null && ideal_unit_price !== '' ? Number(ideal_unit_price) : null
     if (purchase_date !== undefined) updateData.purchase_date = purchase_date || null
+    if (req.body.receipt_status !== undefined) updateData.receipt_status = req.body.receipt_status
     updateData.updated_at = db.fn.now()
 
     await db('supplies').where({ id: parseInt(req.params.id) }).update(updateData)
