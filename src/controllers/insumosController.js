@@ -27,11 +27,12 @@ async function list (req, res) {
     const [{ total }] = await countQuery
 
     // Apply ordering and pagination
-    const orderMap = { 
-      created_at: 's.created_at', 
-      name: 's.name', 
-      type: 's.type', 
-      unit_cost: 's.unit_cost' 
+    const orderMap = {
+      created_at: 's.created_at',
+      name: 's.name',
+      type: 's.type',
+      unit_cost: 's.unit_cost',
+      purchase_date: 's.purchase_date',
     }
     const orderCol = orderMap[ordem] || 's.created_at'
     const orderDir = dir === 'ASC' ? 'asc' : 'desc'
@@ -75,7 +76,7 @@ async function getOne (req, res) {
 async function create (req, res) {
   console.log('🔍 CREATE - Iniciando...')
   try {
-    const { name, type, supplier_id, unit, quantity_purchased, total_amount_paid, batch = '', notes = '', ideal_unit_price } = req.body
+    const { name, type, supplier_id, unit, quantity_purchased, total_amount_paid, batch = '', notes = '', ideal_unit_price, purchase_date } = req.body
     console.log('🔍 CREATE - Dados recebidos:', { name, type, supplier_id })
 
     // Verify supplier exists
@@ -99,6 +100,7 @@ async function create (req, res) {
       batch,
       notes,
       ideal_unit_price: ideal_unit_price != null && ideal_unit_price !== '' ? Number(ideal_unit_price) : null,
+      purchase_date: purchase_date || new Date().toISOString().slice(0, 10),
     }
 
     const result = await db('supplies').insert(insertData).returning('*')
@@ -122,7 +124,7 @@ async function update (req, res) {
       return res.status(404).json({ error: 'Supply not found' })
     }
 
-    const { name, type, supplier_id, unit, quantity_purchased, total_amount_paid, batch, notes, ideal_unit_price } = req.body
+    const { name, type, supplier_id, unit, quantity_purchased, total_amount_paid, batch, notes, ideal_unit_price, purchase_date } = req.body
 
     // Verify supplier exists if changing
     if (supplier_id) {
@@ -142,6 +144,7 @@ async function update (req, res) {
     if (batch !== undefined) updateData.batch = batch
     if (notes !== undefined) updateData.notes = notes
     if (ideal_unit_price !== undefined) updateData.ideal_unit_price = ideal_unit_price !== null && ideal_unit_price !== '' ? Number(ideal_unit_price) : null
+    if (purchase_date !== undefined) updateData.purchase_date = purchase_date || null
     updateData.updated_at = db.fn.now()
 
     await db('supplies').where({ id: parseInt(req.params.id) }).update(updateData)

@@ -3,7 +3,7 @@ const { db } = require('../models/db')
 // ─── LIST ─────────────────────────────────────────────────────────────────────
 async function list (req, res) {
   try {
-    const { busca } = req.query
+    const { busca, incluir_inativos } = req.query
 
     let query = db('suppliers as s')
       .leftJoin('supplies as sp', 'sp.supplier_id', 's.id')
@@ -11,6 +11,10 @@ async function list (req, res) {
       .count('sp.id as total_supplies')
       .groupBy('s.id')
       .orderBy('s.name', 'asc')
+
+    if (!incluir_inativos) {
+      query = query.where('s.active', true)
+    }
 
     if (busca) {
       query = query.where(function() {
@@ -61,7 +65,8 @@ async function create (req, res) {
       phone,
       address,
       notes,
-      type
+      type,
+      active: true,
     }).returning('*')
 
     res.status(201).json(created)
@@ -78,17 +83,18 @@ async function update (req, res) {
       return res.status(404).json({ error: 'Supplier not found' })
     }
 
-    const { name, tax_id, contact, email, phone, address, notes, type } = req.body
+    const { name, tax_id, contact, email, phone, address, notes, type, active } = req.body
 
     const updateData = {}
-    if (name !== undefined) updateData.name = name
-    if (tax_id !== undefined) updateData.tax_id = tax_id
+    if (name !== undefined)    updateData.name    = name
+    if (tax_id !== undefined)  updateData.tax_id  = tax_id
     if (contact !== undefined) updateData.contact = contact
-    if (email !== undefined) updateData.email = email
-    if (phone !== undefined) updateData.phone = phone
+    if (email !== undefined)   updateData.email   = email
+    if (phone !== undefined)   updateData.phone   = phone
     if (address !== undefined) updateData.address = address
-    if (notes !== undefined) updateData.notes = notes
-    if (type !== undefined) updateData.type = type
+    if (notes !== undefined)   updateData.notes   = notes
+    if (type !== undefined)    updateData.type    = type
+    if (active !== undefined)  updateData.active  = Boolean(active)
     updateData.updated_at = db.fn.now()
 
     await db('suppliers').where({ id: parseInt(req.params.id) }).update(updateData)
@@ -100,7 +106,7 @@ async function update (req, res) {
   }
 }
 
-// ─── DELETE ───────────────────────────────────────────────────────────────────
+// ─── INATIVAR (soft delete) ───────────────────────────────────────────────────
 async function remove (req, res) {
   try {
     const supplier = await db('suppliers').where({ id: parseInt(req.params.id) }).first()
@@ -108,15 +114,35 @@ async function remove (req, res) {
       return res.status(404).json({ error: 'Supplier not found' })
     }
 
-    await db('suppliers').where({ id: parseInt(req.params.id) }).del()
-    res.json({ message: 'Supplier removed' })
+    await db('suppliers').where({ id: parseInt(req.params.id) }).update({
+      active: false,
+      updated_at: db.fn.now(),
+    })
+
+    res.json({ message: 'Supplier deactivated' })
   } catch (e) {
-    if (e.code === '23503') { // Foreign key violation
-      res.status(400).json({ error: 'Supplier has linked supplies and cannot be removed' })
-    } else {
-      res.status(400).json({ error: e.message })
-    }
+    res.status(400).json({ error: e.message })
   }
 }
 
-module.exports = { list, getOne, create, update, remove }
+// ─── REATIVAR ─────────────────────────────────────────────────────────────────
+async function reativar (req, res) {
+  try {
+    const supplier = await db('suppliers').where({ id: parseInt(req.params.id) }).first()
+    if (!supplier) {
+      return res.status(404).json({ error: 'Supplier not found' })
+    }
+
+    await db('suppliers').where({ id: parseInt(req.params.id) }).update({
+      active: true,
+      updated_at: db.fn.now(),
+    })
+
+    const updated = await db('suppliers').where({ id: parseInt(req.params.id) }).first()
+    res.json(updated)
+  } catch (e) {
+    res.status(400).json({ error: e.message })
+  }
+}
+
+module.exports = { list, getOne, create, update, remove, reativar }
