@@ -147,22 +147,35 @@ exports.create = async (req, res) => {
           return res.status(404).json({ error: 'Batch not found' })
         }
 
-        // Verificar se tem quantidade disponível
-        if (item.quantity_available_ml < quantity_lost) {
+        if (parseFloat(item.remaining_ml) < quantity_lost) {
           await trx.rollback()
-          return res.status(400).json({ 
-            error: `Insufficient quantity. Available: ${item.quantity_available_ml} ml` 
+          return res.status(400).json({
+            error: `Quantidade insuficiente. Disponível: ${item.remaining_ml} ml`
           })
         }
 
         cost = item.cost_per_ml * quantity_lost
         unit = 'ml'
-        itemName = `Lote ${item.code}`
+        itemName = `Lote ${item.batch_code}`
 
-        // Baixar estoque do lote
+        const newRemainingMl = Math.max(0, parseFloat(item.remaining_ml) - quantity_lost)
         await trx('batches')
           .where({ id: item_id })
-          .decrement('quantity_available_ml', quantity_lost)
+          .update({
+            remaining_ml: newRemainingMl,
+            status: newRemainingMl <= 0 ? 'Finalizado' : item.status,
+            updated_at: trx.fn.now()
+          })
+
+        await trx('batch_movements').insert({
+          batch_id:      item_id,
+          movement_type: 'loss',
+          quantity_ml:   -quantity_lost,
+          previous_ml:   item.remaining_ml,
+          current_ml:    newRemainingMl,
+          notes:         reason,
+          operator:      operator || 'system'
+        })
 
         break
 
@@ -296,7 +309,7 @@ exports.delete = async (req, res) => {
       case 'Batch':
         await trx('batches')
           .where({ id: loss.item_id })
-          .increment('quantity_available_ml', loss.quantity_lost)
+          .increment('remaining_ml', loss.quantity_lost)
         break
 
       case 'Bottling':
