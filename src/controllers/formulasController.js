@@ -7,7 +7,7 @@ async function list(req, res) {
     const { product_id, validated, active } = req.query
     
     let query = db('formulas as f')
-      .join('products as p', 'p.id', 'f.product_id')
+      .leftJoin('products as p', 'p.id', 'f.product_id')
       .leftJoin('batches as b', 'b.formula_id', 'f.id')
       .select(
         'f.*',
@@ -43,7 +43,7 @@ async function list(req, res) {
 async function getOne(req, res) {
   try {
     const formula = await db('formulas as f')
-      .join('products as p', 'p.id', 'f.product_id')
+      .leftJoin('products as p', 'p.id', 'f.product_id')
       .select('f.*', 'p.project_name', 'p.commercial_name')
       .where('f.id', parseInt(req.params.id))
       .first()
@@ -84,25 +84,30 @@ async function getOne(req, res) {
 // ─── CREATE FORMULA ───────────────────────────────────────────────────────────
 async function create(req, res) {
   try {
-    const { product_id, name, description = '', items = [] } = req.body
-    
-    // Verificar se produto existe
-    const product = await db('products').where('id', parseInt(product_id)).first()
-    if (!product) {
-      return res.status(400).json({ error: 'Product not found' })
+    const { product_id, name, description = '', essence_percentage = 0, items = [] } = req.body
+
+    // Verificar se produto existe, se informado
+    if (product_id) {
+      const product = await db('products').where('id', parseInt(product_id)).first()
+      if (!product) {
+        return res.status(400).json({ error: 'Product not found' })
+      }
     }
-    
+
     // Usar transação para criar fórmula + itens
     const result = await db.transaction(async (trx) => {
-      // Calcular total de percentuais
-      const totalPercentage = items.reduce((sum, item) => sum + parseFloat(item.percentage), 0)
-      const validated = Math.abs(totalPercentage - 100) < 0.01 // Tolerância de 0.01%
-      
+      // Total = essência + demais insumos
+      const essencePct = parseFloat(essence_percentage) || 0
+      const itemsTotal = items.reduce((sum, item) => sum + parseFloat(item.percentage), 0)
+      const totalPercentage = essencePct + itemsTotal
+      const validated = Math.abs(totalPercentage - 100) < 0.01
+
       // Criar fórmula
       const [formula] = await trx('formulas').insert({
-        product_id: parseInt(product_id),
+        product_id: product_id ? parseInt(product_id) : null,
         name,
         description,
+        essence_percentage: essencePct,
         total_percentage: totalPercentage,
         validated,
         active: true
@@ -147,17 +152,20 @@ async function update(req, res) {
       return res.status(404).json({ error: 'Formula not found' })
     }
     
-    const { name, description, items } = req.body
-    
+    const { name, description, essence_percentage, items } = req.body
+
     const result = await db.transaction(async (trx) => {
       // Atualizar fórmula
       const updateData = { updated_at: trx.fn.now() }
       if (name !== undefined) updateData.name = name
       if (description !== undefined) updateData.description = description
-      
+      if (essence_percentage !== undefined) updateData.essence_percentage = parseFloat(essence_percentage) || 0
+
       // Se itens foram fornecidos, recalcular percentual total
       if (items) {
-        const totalPercentage = items.reduce((sum, item) => sum + parseFloat(item.percentage), 0)
+        const essencePct = essence_percentage !== undefined ? (parseFloat(essence_percentage) || 0) : parseFloat(formula.essence_percentage || 0)
+        const itemsTotal = items.reduce((sum, item) => sum + parseFloat(item.percentage), 0)
+        const totalPercentage = essencePct + itemsTotal
         updateData.total_percentage = totalPercentage
         updateData.validated = Math.abs(totalPercentage - 100) < 0.01
         
@@ -222,9 +230,10 @@ async function validate(req, res) {
       return res.status(404).json({ error: 'Formula not found' })
     }
     
-    // Recalcular percentual total
+    // Recalcular percentual total (essência + itens)
     const items = await db('formula_items').where('formula_id', parseInt(req.params.id))
-    const totalPercentage = items.reduce((sum, item) => sum + parseFloat(item.percentage), 0)
+    const itemsTotal = items.reduce((sum, item) => sum + parseFloat(item.percentage), 0)
+    const totalPercentage = parseFloat(formula.essence_percentage || 0) + itemsTotal
     const validated = Math.abs(totalPercentage - 100) < 0.01
     
     const [updated] = await db('formulas')

@@ -30,7 +30,7 @@ async function list(req, res) {
     
     let query = db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
-      .join('products as p', 'p.id', 'f.product_id')
+      .leftJoin('products as p', 'p.id', 'f.product_id')
       .select(
         'b.*',
         'f.name as formula_name',
@@ -86,7 +86,7 @@ async function getOne(req, res) {
   try {
     const batch = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
-      .join('products as p', 'p.id', 'f.product_id')
+      .leftJoin('products as p', 'p.id', 'f.product_id')
       .select(
         'b.*',
         'f.name as formula_name',
