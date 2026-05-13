@@ -238,6 +238,7 @@ async function create(req, res) {
         label_cost: labelCost,
         total_cost: totalCost,
         unit_cost: unitCost,
+        quantity_available: parseInt(quantity),
         notes,
         active: true
       }).returning('*')
@@ -558,6 +559,37 @@ async function getBatchesInMaceration(req, res) {
   }
 }
 
+// ─── STOCK SUMMARY ────────────────────────────────────────────────────────────
+async function stockSummary (req, res) {
+  try {
+    const rows = await db('bottlings')
+      .where('active', true)
+      .where('quantity_available', '>', 0)
+      .select('product_name', 'volume_ml')
+      .sum('quantity_available as total_available')
+      .sum('quantity as total_produced')
+      .sum(db.raw('unit_cost * quantity_available'))
+      .avg('unit_cost as avg_unit_cost')
+      .max('bottling_date as last_bottling')
+      .groupBy('product_name', 'volume_ml')
+      .orderBy('product_name')
+
+    const mapped = rows.map(r => ({
+      product_name:    r.product_name,
+      volume_ml:       r.volume_ml,
+      total_available: parseInt(r.total_available) || 0,
+      total_produced:  parseInt(r.total_produced)  || 0,
+      avg_unit_cost:   parseFloat(r.avg_unit_cost) || 0,
+      total_value:     parseFloat(r['sum']) || 0,
+      last_bottling:   r.last_bottling,
+    }))
+
+    res.json(mapped)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
 module.exports = {
   list,
   getOne,
@@ -566,5 +598,6 @@ module.exports = {
   remove,
   stats,
   getAvailableBatches,
-  getBatchesInMaceration
+  getBatchesInMaceration,
+  stockSummary
 }

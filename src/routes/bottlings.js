@@ -26,6 +26,7 @@ const updateBottlingRules = [
 
 router.get('/', ctrl.list)
 router.get('/stats', ctrl.stats)
+router.get('/stock-summary', ctrl.stockSummary)
 router.get('/available-batches', ctrl.getAvailableBatches)
 router.get('/in-maceration', ctrl.getBatchesInMaceration)
 router.get('/:id', [param('id').isInt()], validate, ctrl.getOne)
