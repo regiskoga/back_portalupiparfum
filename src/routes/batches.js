@@ -21,6 +21,7 @@ const updateBatchRules = [
 
 router.get('/', ctrl.list)
 router.get('/stats', ctrl.stats)
+router.get('/next-code', ctrl.nextCode)
 router.get('/formula-info/:formula_id', [param('formula_id').isInt()], validate, ctrl.formulaInfo)
 router.post('/merge', ctrl.mergeBatches)
 router.post('/update-maceration-status', ctrl.updateMacerationStatus)

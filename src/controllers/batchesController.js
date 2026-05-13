@@ -483,6 +483,15 @@ async function mergeBatches (req, res) {
   }
 }
 
+async function nextCode (req, res) {
+  try {
+    const code = await generateBatchCode()
+    res.json({ batch_code: code })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
 module.exports = {
   list,
   getOne,
@@ -494,7 +503,8 @@ module.exports = {
   canBeBottled,
   updateMacerationStatus,
   formulaInfo,
-  mergeBatches
+  mergeBatches,
+  nextCode
 }
 
 
