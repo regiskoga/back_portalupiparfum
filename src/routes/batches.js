@@ -6,10 +6,15 @@ const { validate } = require('../middleware/validate')
 const BATCH_STATUSES = ['Em maceração', 'Pronto para envase', 'Finalizado']
 
 const batchRules = [
+  body('product_id').optional({ nullable: true }).isInt({ min: 1 }).withMessage('Valid product_id is required'),
   body('formula_id').isInt({ min: 1 }).withMessage('Valid formula_id is required'),
   body('batch_code').optional().trim(),
   body('production_date').isISO8601().withMessage('Valid production date is required'),
-  body('quantity_ml').isFloat({ gt: 0 }).withMessage('Quantity must be greater than 0'),
+  body('quantity_ml').optional({ nullable: true }).isFloat({ gt: 0 }),
+  body('essences').optional().isArray(),
+  body('essences.*.supply_id').optional().isInt({ min: 1 }),
+  body('essences.*.quantity').optional().isFloat({ gt: 0 }),
+  body('essences.*.unit').optional().trim(),
   body('notes').optional().trim(),
   body('start_maceration').optional().isBoolean()
 ]

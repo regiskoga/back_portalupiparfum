@@ -7,30 +7,37 @@ async function getParam (key, defaultValue) {
 }
 
 // ─── GENERATE BATCH CODE ──────────────────────────────────────────────────────
-async function generateBatchCode () {
-  const today = new Date()
-  const yy = String(today.getFullYear()).slice(2)
-  const mm = String(today.getMonth() + 1).padStart(2, '0')
-  const dd = String(today.getDate()).padStart(2, '0')
-  const prefix = `L${yy}${mm}${dd}`
+// Formato: L_PPPPP_FFFFF_YYYYMMDD_N
+// PPPPP = product_id 5 dígitos | FFFFF = formula_id 5 dígitos | N = lotes do projeto
+async function generateBatchCode (product_id, formula_id, production_date) {
+  const paddedProject = String(product_id || 0).padStart(5, '0')
+  const paddedFormula = String(formula_id || 0).padStart(5, '0')
+  const datePart = (production_date || new Date().toISOString().slice(0, 10)).replace(/-/g, '')
 
   const { cnt } = await db('batches')
-    .where('batch_code', 'like', `${prefix}%`)
+    .where('product_id', product_id)
     .count('* as cnt')
     .first()
 
-  const seq = String(parseInt(cnt) + 1).padStart(3, '0')
-  return `${prefix}-${seq}`
+  const N = parseInt(cnt || 0) + 1
+  return `L_${paddedProject}_${paddedFormula}_${datePart}_${N}`
+}
+
+// ─── REDUCED LOT NUMBER ───────────────────────────────────────────────────────
+async function getNextReducedLotNumber (product_id) {
+  if (!product_id) return 1
+  const { cnt } = await db('batches').where('product_id', product_id).count('* as cnt').first()
+  return parseInt(cnt || 0) + 1
 }
 
 // ─── LIST BATCHES ─────────────────────────────────────────────────────────────
 async function list(req, res) {
   try {
-    const { formula_id, status, search } = req.query
-    
+    const { formula_id, product_id, status, search } = req.query
+
     let query = db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
-      .leftJoin('products as p', 'p.id', 'f.product_id')
+      .leftJoin('products as p', 'p.id', 'b.product_id')
       .select(
         'b.*',
         'f.name as formula_name',
@@ -38,16 +45,20 @@ async function list(req, res) {
         'p.commercial_name'
       )
       .orderBy('b.production_date', 'desc')
-    
+
     // Filtros
     if (formula_id) {
       query = query.where('b.formula_id', parseInt(formula_id))
     }
-    
+
+    if (product_id) {
+      query = query.where('b.product_id', parseInt(product_id))
+    }
+
     if (status) {
       query = query.where('b.status', status)
     }
-    
+
     if (search) {
       query = query.where(function() {
         this.where('b.batch_code', 'ilike', `%${search}%`)
@@ -86,11 +97,12 @@ async function getOne(req, res) {
   try {
     const batch = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
-      .leftJoin('products as p', 'p.id', 'f.product_id')
+      .leftJoin('products as p', 'p.id', 'b.product_id')
       .select(
         'b.*',
         'f.name as formula_name',
         'f.description as formula_description',
+        'f.essence_percentage',
         'p.project_name',
         'p.commercial_name'
       )
@@ -132,9 +144,24 @@ async function getOne(req, res) {
       }
     }
     
+    // Buscar essências usadas no lote
+    const batchEssences = await db('batch_essences as be')
+      .join('supplies as s', 's.id', 'be.supply_id')
+      .join('suppliers as sp', 'sp.id', 's.supplier_id')
+      .select(
+        'be.*',
+        's.name as supply_name',
+        's.unit_cost',
+        's.batch as supply_batch',
+        'sp.name as supplier_name'
+      )
+      .where('be.batch_id', batch.id)
+      .orderBy('be.id', 'asc')
+
     batch.movements = movements
     batch.formula_items = formulaItems
-    
+    batch.batch_essences = batchEssences
+
     res.json(batch)
   } catch (error) {
     res.status(500).json({ error: error.message })
@@ -145,91 +172,120 @@ async function getOne(req, res) {
 async function create(req, res) {
   try {
     const {
+      product_id,
       formula_id,
       batch_code: providedCode,
       production_date,
-      quantity_ml,
+      quantity_ml: providedQty,
+      essences = [],   // [{ supply_id, quantity, unit }]
       notes = '',
       start_maceration = true
     } = req.body
 
-    // Verificar se fórmula existe e está validada
+    // Verificar projeto
+    if (product_id) {
+      const product = await db('products').where('id', parseInt(product_id)).first()
+      if (!product) return res.status(400).json({ error: 'Product not found' })
+    }
+
+    // Verificar fórmula
     const formula = await db('formulas').where('id', parseInt(formula_id)).first()
-    if (!formula) {
-      return res.status(400).json({ error: 'Formula not found' })
+    if (!formula) return res.status(400).json({ error: 'Formula not found' })
+    if (!formula.validated) return res.status(400).json({ error: 'Formula must be validated before creating batch' })
+
+    // Calcular volume total do lote a partir das essências (se informadas)
+    let quantity_ml = parseFloat(providedQty) || 0
+    if (essences.length > 0 && parseFloat(formula.essence_percentage) > 0) {
+      const totalEssenceMl = essences.reduce((sum, e) => sum + parseFloat(e.quantity || 0), 0)
+      quantity_ml = totalEssenceMl / (parseFloat(formula.essence_percentage) / 100)
     }
 
-    if (!formula.validated) {
-      return res.status(400).json({ error: 'Formula must be validated before creating batch' })
-    }
-
-    const batch_code = providedCode && providedCode.trim() ? providedCode.trim() : await generateBatchCode()
+    if (quantity_ml <= 0) return res.status(400).json({ error: 'Quantity must be greater than 0' })
 
     // Buscar itens da fórmula para calcular custo
     const formulaItems = await db('formula_items as fi')
       .join('supplies as s', 's.id', 'fi.supply_id')
-      .select('fi.percentage', 's.unit_cost')
+      .select('fi.supply_id', 'fi.percentage', 's.unit_cost')
       .where('fi.formula_id', parseInt(formula_id))
 
-    // Calcular custo total do lote
-    const totalCost = formulaItems.reduce((sum, item) => {
-      const itemCostPerMl = (parseFloat(item.unit_cost) * parseFloat(item.percentage)) / 100
-      return sum + (itemCostPerMl * parseFloat(quantity_ml))
+    // Custo das essências
+    let essenceCost = 0
+    for (const e of essences) {
+      const supply = await db('supplies').where('id', parseInt(e.supply_id)).first()
+      if (supply) essenceCost += parseFloat(supply.unit_cost || 0) * parseFloat(e.quantity || 0)
+    }
+
+    // Custo dos demais insumos
+    const insumosCost = formulaItems.reduce((sum, item) => {
+      const itemQty = (quantity_ml * parseFloat(item.percentage)) / 100
+      return sum + (parseFloat(item.unit_cost) * itemQty)
     }, 0)
 
-    const costPerMl = totalCost / parseFloat(quantity_ml)
+    const totalCost = essenceCost + insumosCost
+    const costPerMl = quantity_ml > 0 ? totalCost / quantity_ml : 0
+
+    // Lote reduzido e código
+    const reduced_lot_number = await getNextReducedLotNumber(product_id ? parseInt(product_id) : null)
+    const batch_code = providedCode?.trim() || await generateBatchCode(
+      product_id ? parseInt(product_id) : 0,
+      parseInt(formula_id),
+      production_date
+    )
 
     // Datas de maceração
     const macerationDays = parseInt(await getParam('maceration_days', 10))
     const macerationStart = start_maceration ? new Date(production_date) : null
-    const macerationEnd = start_maceration ? new Date(new Date(production_date).getTime() + (macerationDays * 24 * 60 * 60 * 1000)) : null
+    const macerationEnd = start_maceration
+      ? new Date(new Date(production_date).getTime() + macerationDays * 24 * 60 * 60 * 1000)
+      : null
 
     const result = await db.transaction(async (trx) => {
-      // Criar lote
       const [batch] = await trx('batches').insert({
+        product_id: product_id ? parseInt(product_id) : null,
         formula_id: parseInt(formula_id),
         batch_code,
         production_date,
-        quantity_ml: parseFloat(quantity_ml),
-        remaining_ml: parseFloat(quantity_ml),
+        quantity_ml,
+        remaining_ml: quantity_ml,
         total_cost: totalCost,
         cost_per_ml: costPerMl,
+        reduced_lot_number,
         status: start_maceration ? 'Em maceração' : 'Pronto para envase',
         maceration_start: macerationStart,
         maceration_end: macerationEnd,
         notes,
         active: true
       }).returning('*')
-      
+
       // Registrar movimentação de produção
       await trx('batch_movements').insert({
         batch_id: batch.id,
         movement_type: 'production',
-        quantity_ml: parseFloat(quantity_ml),
+        quantity_ml,
         previous_ml: 0,
-        current_ml: parseFloat(quantity_ml),
+        current_ml: quantity_ml,
         notes: `Produção inicial do lote ${batch_code}`,
         operator: 'system'
       })
-      
-      // Baixar insumos do estoque (proporcional aos percentuais)
-      for (const item of formulaItems) {
-        const quantityUsed = (parseFloat(quantity_ml) * parseFloat(item.percentage)) / 100
-        
-        // Aqui deveria baixar do estoque de supplies
-        // Por enquanto, apenas registramos o uso
-        console.log(`Usado ${quantityUsed}ml do insumo ${item.supply_id}`)
+
+      // Registrar essências usadas
+      if (essences.length > 0) {
+        const essenceRows = essences.map(e => ({
+          batch_id: batch.id,
+          supply_id: parseInt(e.supply_id),
+          quantity: parseFloat(e.quantity),
+          unit: e.unit || 'ml'
+        }))
+        await trx('batch_essences').insert(essenceRows)
       }
-      
+
       return batch
     })
-    
-    // Log da criação
+
     await ActivityLogger.logCreate('batch', result.id, batch_code, result)
-    
     res.status(201).json(result)
   } catch (error) {
-    if (error.code === '23505') { // Unique violation
+    if (error.code === '23505') {
       res.status(400).json({ error: 'Batch code already exists' })
     } else {
       res.status(400).json({ error: error.message })
@@ -379,13 +435,13 @@ async function startMaceration(req, res) {
   }
 }
 
-// ─── FORMULA INFO (project + essence %) ──────────────────────────────────────
+// ─── FORMULA INFO (essence % + itens para pre-fill no lote) ──────────────────
 async function formulaInfo (req, res) {
   try {
     const formula_id = parseInt(req.params.formula_id)
     const formula = await db('formulas as f')
-      .join('products as p', 'p.id', 'f.product_id')
-      .select('f.id', 'f.name', 'p.project_name', 'p.commercial_name')
+      .leftJoin('products as p', 'p.id', 'f.product_id')
+      .select('f.id', 'f.name', 'f.essence_percentage', 'p.project_name', 'p.commercial_name')
       .where('f.id', formula_id)
       .first()
 
@@ -393,14 +449,21 @@ async function formulaInfo (req, res) {
 
     const items = await db('formula_items as fi')
       .join('supplies as s', 's.id', 'fi.supply_id')
-      .select('fi.percentage', 's.type')
+      .join('suppliers as sp', 'sp.id', 's.supplier_id')
+      .select(
+        'fi.supply_id',
+        'fi.percentage',
+        's.name as supply_name',
+        's.type as supply_type',
+        's.unit',
+        's.unit_cost',
+        'sp.id as supplier_id',
+        'sp.name as supplier_name'
+      )
       .where('fi.formula_id', formula_id)
+      .orderBy('fi.order_index', 'asc')
 
-    const essence_percentage = items
-      .filter(i => i.type === 'Essence')
-      .reduce((sum, i) => sum + parseFloat(i.percentage), 0)
-
-    res.json({ ...formula, essence_percentage })
+    res.json({ ...formula, items })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -485,8 +548,14 @@ async function mergeBatches (req, res) {
 
 async function nextCode (req, res) {
   try {
-    const code = await generateBatchCode()
-    res.json({ batch_code: code })
+    const { product_id, formula_id, production_date } = req.query
+    const code = await generateBatchCode(
+      product_id ? parseInt(product_id) : 0,
+      formula_id ? parseInt(formula_id) : 0,
+      production_date || null
+    )
+    const reduced_lot_number = await getNextReducedLotNumber(product_id ? parseInt(product_id) : null)
+    res.json({ batch_code: code, reduced_lot_number })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
