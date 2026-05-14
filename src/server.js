@@ -1,5 +1,6 @@
 const express = require('express')
 const path    = require('path')
+const { db }  = require('./models/db')
 
 const authRoutes      = require('./routes/auth')
 const usersRoutes     = require('./routes/users')
@@ -154,7 +155,20 @@ app.use((err, _req, res, _next) => {
 })
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+;(async () => {
+  try {
+    const [batch, ran] = await db.migrate.latest()
+    if (ran.length === 0) {
+      console.log('✅ Migrations: nenhuma pendente')
+    } else {
+      console.log(`✅ Migrations executadas (batch ${batch}): ${ran.map(m => m.split('/').pop()).join(', ')}`)
+    }
+  } catch (err) {
+    console.error('❌ Erro ao rodar migrations:', err.message)
+    process.exit(1)
+  }
+
+  app.listen(PORT, () => {
   console.log(`\n🌸 Perfumaria API running on http://localhost:${PORT}`)
   console.log(`   Available endpoints:`)
   console.log(`   GET  /api/supplies`)
@@ -220,6 +234,7 @@ app.listen(PORT, () => {
   console.log(`   GET  /api/dashboard/production`)
   console.log(`   GET  /api/dashboard/alerts`)
   console.log(`   GET  /api/dashboard/sales\n`)
-})
+  })
+})()
 
 module.exports = app
