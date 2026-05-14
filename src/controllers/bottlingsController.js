@@ -56,7 +56,7 @@ async function list(req, res) {
       const batches = await db('bottling_batches as bb')
         .join('batches as b', 'b.id', 'bb.batch_id')
         .join('formulas as f', 'f.id', 'b.formula_id')
-        .join('products as p', 'p.id', 'f.product_id')
+        .leftJoin('products as p', 'p.id', 'b.product_id')
         .select(
           'bb.*',
           'b.batch_code',
@@ -65,7 +65,7 @@ async function list(req, res) {
           'p.project_name'
         )
         .where('bb.bottling_id', bottling.id)
-      
+
       bottling.batches = batches
       bottling.total_ml_used = batches.reduce((sum, b) => sum + parseFloat(b.ml_used), 0)
     }
@@ -100,7 +100,7 @@ async function getOne(req, res) {
     const batches = await db('bottling_batches as bb')
       .join('batches as b', 'b.id', 'bb.batch_id')
       .join('formulas as f', 'f.id', 'b.formula_id')
-      .join('products as p', 'p.id', 'f.product_id')
+      .leftJoin('products as p', 'p.id', 'b.product_id')
       .select(
         'bb.*',
         'b.batch_code',
@@ -459,7 +459,7 @@ async function getAvailableBatches(req, res) {
     // Retorna todos os lotes com ML disponível (exceto Finalizados)
     const batches = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
-      .join('products as p', 'p.id', 'f.product_id')
+      .leftJoin('products as p', 'p.id', 'b.product_id')
       .select(
         'b.id',
         'b.batch_code',
@@ -489,7 +489,7 @@ async function getBatchesInMaceration(req, res) {
   try {
     const batches = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
-      .join('products as p', 'p.id', 'f.product_id')
+      .leftJoin('products as p', 'p.id', 'b.product_id')
       .select(
         'b.id',
         'b.batch_code',
