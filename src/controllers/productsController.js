@@ -79,6 +79,7 @@ async function create(req, res) {
       inspiration_brand = '',
       inspiration_name = '',
       commercial_name = '',
+      sku = null,
       gender = 'Unissex',
       narrative = '',
       top_notes = '',
@@ -86,12 +87,13 @@ async function create(req, res) {
       base_notes = '',
       notes = ''
     } = req.body
-    
+
     const [product] = await db('products').insert({
       project_name,
       inspiration_brand,
       inspiration_name,
       commercial_name,
+      sku,
       gender,
       narrative,
       top_notes,
