@@ -3,7 +3,7 @@
  * Gerencia pedidos com motor de decisão automática
  */
 
-const db = require('../models/db')
+const { db } = require('../models/db')
 const orderDecisionEngine = require('../services/orderDecisionEngine')
 const activityLogger = require('../services/activityLogger')
 

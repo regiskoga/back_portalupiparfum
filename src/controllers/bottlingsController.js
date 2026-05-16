@@ -313,13 +313,25 @@ async function create(req, res) {
       
       // Baixar insumos do estoque (frascos e rótulos)
       if (bottle_supply_id) {
-        // Aqui deveria baixar do estoque de frascos
-        console.log(`Baixar ${quantity} frascos do supply ${bottle_supply_id}`)
+        const bottleSupply = await trx('supplies').where('id', parseInt(bottle_supply_id)).first()
+        if (!bottleSupply) throw new Error('Frasco não encontrado')
+        if (parseFloat(bottleSupply.quantity_available) < parseInt(quantity)) {
+          throw new Error(`Estoque insuficiente de frascos. Disponível: ${bottleSupply.quantity_available} ${bottleSupply.unit}`)
+        }
+        await trx('supplies')
+          .where('id', parseInt(bottle_supply_id))
+          .decrement('quantity_available', parseInt(quantity))
       }
-      
+
       if (label_supply_id) {
-        // Aqui deveria baixar do estoque de rótulos
-        console.log(`Baixar ${quantity} rótulos do supply ${label_supply_id}`)
+        const labelSupply = await trx('supplies').where('id', parseInt(label_supply_id)).first()
+        if (!labelSupply) throw new Error('Rótulo não encontrado')
+        if (parseFloat(labelSupply.quantity_available) < parseInt(quantity)) {
+          throw new Error(`Estoque insuficiente de rótulos. Disponível: ${labelSupply.quantity_available} ${labelSupply.unit}`)
+        }
+        await trx('supplies')
+          .where('id', parseInt(label_supply_id))
+          .decrement('quantity_available', parseInt(quantity))
       }
       
       return bottling

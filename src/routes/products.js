@@ -23,6 +23,7 @@ router.get('/stats', ctrl.stats)
 router.get('/:id', [param('id').isInt()], validate, ctrl.getOne)
 router.post('/', productRules, validate, ctrl.create)
 router.put('/:id', [param('id').isInt(), ...productRules], validate, ctrl.update)
+router.patch('/:id', [param('id').isInt()], validate, ctrl.update)
 router.delete('/:id', [param('id').isInt()], validate, ctrl.remove)
 
 module.exports = router

@@ -10,7 +10,7 @@
  * 5. Falta insumos? → Gerar Ordem de Compra + Produção (17 dias úteis)
  */
 
-const db = require('../models/db')
+const { db } = require('../models/db')
 
 class OrderDecisionEngine {
   /**

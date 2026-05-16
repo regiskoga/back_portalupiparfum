@@ -3,7 +3,7 @@
  * Gerencia perdas de insumos, lotes e envases
  */
 
-const db = require('../models/db')
+const { db } = require('../models/db')
 const activityLogger = require('../services/activityLogger')
 
 /**
@@ -231,20 +231,7 @@ exports.create = async (req, res) => {
       })
       .returning('*')
 
-    // Log da atividade
-    await activityLogger.log(trx, {
-      type: 'loss_registered',
-      entity_type: item_type.toLowerCase(),
-      entity_id: item_id,
-      description: `Perda registrada: ${quantity_lost} ${unit} de ${itemName} - ${loss_type}`,
-      metadata: {
-        loss_id: loss.id,
-        loss_type,
-        quantity_lost,
-        cost,
-        reason
-      }
-    })
+    await activityLogger.logLoss(item_type.toLowerCase(), item_id, itemName, quantity_lost, reason)
 
     await trx.commit()
 
@@ -324,17 +311,9 @@ exports.delete = async (req, res) => {
       .where({ id })
       .delete()
 
-    // Log da atividade
-    await activityLogger.log(trx, {
-      type: 'loss_deleted',
-      entity_type: loss.item_type.toLowerCase(),
-      entity_id: loss.item_id,
-      description: `Perda deletada (reversão): ${loss.quantity_lost} ${loss.unit} de ${loss.item_name}`,
-      metadata: {
-        loss_id: id,
-        loss_type: loss.loss_type,
-        quantity_lost: loss.quantity_lost
-      }
+    await activityLogger.log('loss_deleted', loss.item_type.toLowerCase(), loss.item_id, {
+      entityName: loss.item_name,
+      description: `Perda revertida: ${loss.item_name} - ${loss.quantity_lost} ${loss.unit}`
     })
 
     await trx.commit()

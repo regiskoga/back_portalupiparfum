@@ -4,7 +4,7 @@ const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
 
 const formulaRules = [
-  body('product_id').isInt({ min: 1 }).withMessage('Valid product_id is required'),
+  body('product_id').optional({ nullable: true }).isInt({ min: 1 }).withMessage('Valid product_id is required'),
   body('name').trim().notEmpty().withMessage('Formula name is required'),
   body('description').optional().trim(),
   body('items').optional().isArray().withMessage('Items must be an array'),

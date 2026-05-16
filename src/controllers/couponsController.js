@@ -3,7 +3,7 @@
  * Gerencia cupons de desconto
  */
 
-const db = require('../models/db')
+const { db } = require('../models/db')
 
 /**
  * Lista todos os cupons

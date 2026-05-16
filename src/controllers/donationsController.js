@@ -3,7 +3,7 @@
  * Gerencia doações e presentes (sem gerar receita)
  */
 
-const db = require('../models/db')
+const { db } = require('../models/db')
 const activityLogger = require('../services/activityLogger')
 
 /**

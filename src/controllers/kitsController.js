@@ -3,7 +3,7 @@
  * Gerencia kits de produtos (ex: Kit 3x15ml, Kit 2x30ml)
  */
 
-const db = require('../models/db')
+const { db } = require('../models/db')
 
 /**
  * Lista todos os kits
