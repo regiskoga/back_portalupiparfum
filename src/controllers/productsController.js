@@ -11,7 +11,14 @@ async function list(req, res) {
       .select(
         'p.*',
         db.raw('COUNT(f.id) as formula_count'),
-        db.raw('COUNT(CASE WHEN f.validated = true THEN 1 END) as validated_formulas')
+        db.raw('COUNT(CASE WHEN f.validated = true THEN 1 END) as validated_formulas'),
+        db.raw(`(
+          SELECT COALESCE(SUM(oi.quantity), 0)
+          FROM order_items oi
+          JOIN orders o ON o.id = oi.order_id
+          WHERE oi.product_id = p.id
+          AND o.status IN ('Pending','Confirmed','In Production','Ready')
+        ) as committed_quantity`)
       )
       .groupBy('p.id')
       .orderBy('p.project_name', 'asc')
@@ -105,7 +112,22 @@ async function create(req, res) {
     
     // Log da criação
     await ActivityLogger.logCreate('product', product.id, project_name, product)
-    
+
+    // Auto-criar entradas na tabela de preços para cada tipo de embalagem ativo
+    try {
+      const packagingTypes = await db('packaging_types').where('active', true).orderBy('volume_ml', 'asc')
+      if (packagingTypes.length > 0) {
+        const today = new Date().toISOString().slice(0, 10)
+        await db('price_lists').insert(packagingTypes.map(pt => ({
+          product_id:        product.id,
+          packaging_type_id: pt.id,
+          volume_ml:         parseFloat(pt.volume_ml),
+          price:             pt.suggested_price ? parseFloat(pt.suggested_price) : 0,
+          valid_from:        today,
+        })))
+      }
+    } catch { /* não bloqueia a criação do produto */ }
+
     res.status(201).json(product)
   } catch (error) {
     res.status(400).json({ error: error.message })

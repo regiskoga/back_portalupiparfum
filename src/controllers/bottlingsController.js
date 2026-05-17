@@ -475,11 +475,13 @@ async function getAvailableBatches(req, res) {
       .select(
         'b.id',
         'b.batch_code',
+        'b.reduced_lot_number',
         'b.remaining_ml',
         'b.cost_per_ml',
         'b.production_date',
         'b.status',
         'b.maceration_end',
+        'b.product_id',
         'f.name as formula_name',
         'p.project_name'
       )

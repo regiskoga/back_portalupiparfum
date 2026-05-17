@@ -177,10 +177,13 @@ async function create(req, res) {
       batch_code: providedCode,
       production_date,
       quantity_ml: providedQty,
+      chorinho_ml: providedChorinho = 0,
       essences = [],   // [{ supply_id, quantity, unit }]
       notes = '',
       start_maceration = true
     } = req.body
+
+    const chorinho_ml = parseFloat(providedChorinho) || 0
 
     // Verificar projeto
     if (product_id) {
@@ -202,6 +205,9 @@ async function create(req, res) {
 
     if (quantity_ml <= 0) return res.status(400).json({ error: 'Quantity must be greater than 0' })
 
+    // Volume real = calculado + chorinho (sobra real da produção)
+    const actual_ml = quantity_ml + chorinho_ml
+
     // Buscar itens da fórmula para calcular custo
     const formulaItems = await db('formula_items as fi')
       .join('supplies as s', 's.id', 'fi.supply_id')
@@ -222,7 +228,7 @@ async function create(req, res) {
     }, 0)
 
     const totalCost = essenceCost + insumosCost
-    const costPerMl = quantity_ml > 0 ? totalCost / quantity_ml : 0
+    const costPerMl = actual_ml > 0 ? totalCost / actual_ml : 0
 
     // Lote reduzido e código
     const reduced_lot_number = await getNextReducedLotNumber(product_id ? parseInt(product_id) : null)
@@ -245,14 +251,15 @@ async function create(req, res) {
         formula_id: parseInt(formula_id),
         batch_code,
         production_date,
-        quantity_ml,
-        remaining_ml: quantity_ml,
-        total_cost: totalCost,
-        cost_per_ml: costPerMl,
+        quantity_ml:   actual_ml,
+        remaining_ml:  actual_ml,
+        chorinho_ml,
+        total_cost:    totalCost,
+        cost_per_ml:   costPerMl,
         reduced_lot_number,
         status: start_maceration ? 'Em maceração' : 'Pronto para envase',
         maceration_start: macerationStart,
-        maceration_end: macerationEnd,
+        maceration_end:   macerationEnd,
         notes,
         active: true
       }).returning('*')
@@ -261,20 +268,24 @@ async function create(req, res) {
       await trx('batch_movements').insert({
         batch_id: batch.id,
         movement_type: 'production',
-        quantity_ml,
-        previous_ml: 0,
-        current_ml: quantity_ml,
-        notes: `Produção inicial do lote ${batch_code}`,
+        quantity_ml:  actual_ml,
+        previous_ml:  0,
+        current_ml:   actual_ml,
+        notes: chorinho_ml > 0
+          ? `Produção inicial do lote ${batch_code} (inclui ${chorinho_ml}ml de chorinho)`
+          : `Produção inicial do lote ${batch_code}`,
         operator: 'system'
       })
 
       // Registrar essências usadas
       if (essences.length > 0) {
         const essenceRows = essences.map(e => ({
-          batch_id: batch.id,
-          supply_id: parseInt(e.supply_id),
-          quantity: parseFloat(e.quantity),
-          unit: e.unit || 'ml'
+          batch_id:         batch.id,
+          supply_id:        parseInt(e.supply_id),
+          quantity:         parseFloat(e.quantity),
+          unit:             e.unit || 'ml',
+          essence_code:     e.essence_code     || null,
+          supplier_lot_ref: e.supplier_lot_ref || null,
         }))
         await trx('batch_essences').insert(essenceRows)
       }
@@ -303,7 +314,18 @@ async function update(req, res) {
     
     const updateData = { ...req.body }
     updateData.updated_at = db.fn.now()
-    
+
+    // Se chorinho_ml mudou, ajusta remaining_ml pelo delta
+    if (updateData.chorinho_ml !== undefined) {
+      const oldChorinho = parseFloat(batch.chorinho_ml || 0)
+      const newChorinho = parseFloat(updateData.chorinho_ml || 0)
+      const delta = newChorinho - oldChorinho
+      if (delta !== 0) {
+        updateData.quantity_ml  = parseFloat(batch.quantity_ml)  + delta
+        updateData.remaining_ml = Math.max(0, parseFloat(batch.remaining_ml) + delta)
+      }
+    }
+
     // Se mudando status para "Pronto para envase", verificar maceração
     if (updateData.status === 'Pronto para envase' && batch.maceration_end) {
       const today = new Date()

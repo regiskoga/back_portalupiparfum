@@ -115,8 +115,10 @@ exports.getById = async (req, res) => {
       .where('order_items.order_id', id)
       .select(
         'order_items.*',
-        'products.name as product_name',
-        'products.commercial_name as product_commercial_name'
+        'products.project_name',
+        'products.commercial_name as product_commercial_name',
+        'products.inspiration_brand',
+        'products.inspiration_name'
       )
 
     order.items = items
@@ -361,7 +363,7 @@ exports.updateStatus = async (req, res) => {
     const { id } = req.params
     const { status } = req.body
 
-    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Shipped', 'Delivered', 'Cancelled']
+    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled']
     
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid status' })

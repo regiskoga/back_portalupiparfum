@@ -4,8 +4,8 @@ const ActivityLogger = require('../services/activityLogger')
 // ─── LIST FORMULAS ────────────────────────────────────────────────────────────
 async function list(req, res) {
   try {
-    const { product_id, validated, active } = req.query
-    
+    const { product_id, validated, active, sort } = req.query
+
     let query = db('formulas as f')
       .leftJoin('products as p', 'p.id', 'f.product_id')
       .leftJoin('batches as b', 'b.formula_id', 'f.id')
@@ -17,7 +17,7 @@ async function list(req, res) {
         db.raw('SUM(b.remaining_ml) as total_remaining_ml')
       )
       .groupBy('f.id', 'p.id')
-      .orderBy('f.created_at', 'desc')
+      .orderBy(sort === 'project_name' ? 'p.project_name' : 'f.created_at', sort === 'project_name' ? 'asc' : 'desc')
     
     // Filtros
     if (product_id) {
