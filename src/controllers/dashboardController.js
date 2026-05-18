@@ -179,8 +179,8 @@ async function getFinancialDashboard(req, res) {
       .groupBy('bt.product_name')
       .orderBy('units_sold', 'desc')
 
-    const netRevenue = (salesRevenue.gross_revenue || 0) - (salesRevenue.total_discounts || 0) + (salesRevenue.total_shipping || 0)
-    const totalCosts = (productionCosts.total_cost || 0) + (bottlingCosts.total_cost || 0)
+    const netRevenue = parseFloat(salesRevenue.gross_revenue || 0) - parseFloat(salesRevenue.total_discounts || 0) + parseFloat(salesRevenue.total_shipping || 0)
+    const totalCosts = parseFloat(productionCosts.total_cost || 0) + parseFloat(bottlingCosts.total_cost || 0)
     const profit = netRevenue - totalCosts
     const profitMargin = netRevenue > 0 ? (profit / netRevenue) * 100 : 0
 
