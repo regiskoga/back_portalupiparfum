@@ -52,14 +52,14 @@ router.post(
       .isIn(['Percentage', 'Fixed Amount', 'Progressive', 'Buy X Get Y'])
       .withMessage('Invalid coupon type'),
     body('discount_value').isFloat({ min: 0 }).withMessage('discount_value must be a positive number'),
-    body('min_items').optional().isInt({ min: 1 }),
-    body('free_items').optional().isInt({ min: 1 }),
-    body('min_order_value').optional().isFloat({ min: 0 }),
-    body('max_uses').optional().isInt({ min: 1 }),
+    body('min_items').optional({ nullable: true }).isInt({ min: 1 }),
+    body('free_items').optional({ nullable: true }).isInt({ min: 1 }),
+    body('min_order_value').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('max_uses').optional({ nullable: true }).isInt({ min: 1 }),
     body('description').optional().isString(),
     body('active').optional().isBoolean(),
-    body('valid_from').optional().isISO8601(),
-    body('valid_until').optional().isISO8601()
+    body('valid_from').optional({ nullable: true }).isISO8601(),
+    body('valid_until').optional({ nullable: true }).isISO8601()
   ],
   validate,
   couponsController.create
@@ -78,14 +78,14 @@ router.patch(
       .isIn(['Percentage', 'Fixed Amount', 'Progressive', 'Buy X Get Y'])
       .withMessage('Invalid coupon type'),
     body('discount_value').optional().isFloat({ min: 0 }),
-    body('min_items').optional().isInt({ min: 1 }),
-    body('free_items').optional().isInt({ min: 1 }),
-    body('min_order_value').optional().isFloat({ min: 0 }),
-    body('max_uses').optional().isInt({ min: 1 }),
+    body('min_items').optional({ nullable: true }).isInt({ min: 1 }),
+    body('free_items').optional({ nullable: true }).isInt({ min: 1 }),
+    body('min_order_value').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('max_uses').optional({ nullable: true }).isInt({ min: 1 }),
     body('description').optional().isString(),
     body('active').optional().isBoolean(),
-    body('valid_from').optional().isISO8601(),
-    body('valid_until').optional().isISO8601()
+    body('valid_from').optional({ nullable: true }).isISO8601(),
+    body('valid_until').optional({ nullable: true }).isISO8601()
   ],
   validate,
   couponsController.update

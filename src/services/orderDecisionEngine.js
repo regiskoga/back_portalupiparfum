@@ -121,14 +121,21 @@ class OrderDecisionEngine {
    * Verifica se existe frasco pronto em estoque
    */
   async checkReadyStock(product_id, volume_ml, quantity) {
-    const bottlings = await db('bottlings')
-      .where({ product_id, volume_ml })
+    const product = await db('products')
+      .where({ id: product_id })
+      .select('project_name')
+      .first()
+
+    if (!product) return { available: false }
+
+    const bottling = await db('bottlings')
+      .where({ product_name: product.project_name, volume_ml })
       .where('quantity_available', '>=', quantity)
       .first()
 
     return {
-      available: !!bottlings,
-      bottling_id: bottlings?.id
+      available: !!bottling,
+      bottling_id: bottling?.id
     }
   }
 
@@ -148,8 +155,8 @@ class OrderDecisionEngine {
     // Buscar lote pronto (não em maceração) com ML suficiente
     const batch = await db('batches')
       .where({ formula_id: formula.id })
-      .where('status', 'Ready')
-      .where('quantity_available_ml', '>=', totalMlNeeded)
+      .where('status', 'Pronto para envase')
+      .where('remaining_ml', '>=', totalMlNeeded)
       .orderBy('created_at', 'desc')
       .first()
 
@@ -173,8 +180,8 @@ class OrderDecisionEngine {
 
     const batch = await db('batches')
       .where({ formula_id: formula.id })
-      .where('status', 'Macerating')
-      .where('quantity_produced_ml', '>=', totalMlNeeded)
+      .where('status', 'Em maceração')
+      .where('quantity_ml', '>=', totalMlNeeded)
       .orderBy('maceration_end', 'asc')
       .first()
 
