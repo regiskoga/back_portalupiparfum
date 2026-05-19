@@ -173,6 +173,12 @@ async function remove (req, res) {
       return res.status(404).json({ error: 'Customer not found' })
     }
 
+    // occurrences.order_id tem RESTRICT — precisa deletar antes do cascade de orders
+    const orderIds = await db('orders').where({ customer_id: parseInt(req.params.id) }).pluck('id')
+    if (orderIds.length > 0) {
+      await db('occurrences').whereIn('order_id', orderIds).del()
+    }
+
     await db('customers').where({ id: parseInt(req.params.id) }).del()
     res.json({ message: 'Customer removed' })
   } catch (e) {

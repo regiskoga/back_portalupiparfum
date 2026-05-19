@@ -167,21 +167,15 @@ async function remove(req, res) {
       return res.status(404).json({ error: 'Product not found' })
     }
     
-    // Verificar se há fórmulas vinculadas
-    const formulaCount = await db('formulas').where('product_id', parseInt(req.params.id)).count('id as count').first()
-    if (parseInt(formulaCount.count) > 0) {
-      return res.status(400).json({ 
-        error: 'Cannot delete product with existing formulas. Delete formulas first.' 
-      })
-    }
-    
     await db('products').where('id', parseInt(req.params.id)).del()
-    
-    // Log da exclusão
+
     await ActivityLogger.logDelete('product', product.id, product.project_name, product)
-    
+
     res.json({ message: 'Product deleted successfully' })
   } catch (error) {
+    if (error.message?.includes('FOREIGN KEY') || error.message?.includes('foreign key') || error.message?.includes('constraint failed')) {
+      return res.status(400).json({ error: 'Não é possível deletar: existem lotes ou pedidos vinculados a este projeto.' })
+    }
     res.status(500).json({ error: error.message })
   }
 }
