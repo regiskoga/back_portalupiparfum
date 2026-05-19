@@ -46,6 +46,7 @@ class OrderDecisionEngine {
         actions: [{
           type: 'bottling_order',
           batch_id: batchReady.batch_id,
+          product_id,
           volume_ml,
           quantity
         }]
@@ -62,6 +63,7 @@ class OrderDecisionEngine {
         actions: [{
           type: 'bottling_order',
           batch_id: batchMacerating.batch_id,
+          product_id,
           volume_ml,
           quantity,
           waitForMaceration: true
@@ -82,6 +84,7 @@ class OrderDecisionEngine {
           quantity_ml: totalMlNeeded
         }, {
           type: 'bottling_order',
+          product_id,
           volume_ml,
           quantity,
           waitForProduction: true
@@ -109,6 +112,7 @@ class OrderDecisionEngine {
         },
         {
           type: 'bottling_order',
+          product_id,
           volume_ml,
           quantity,
           waitForProduction: true

@@ -284,17 +284,8 @@ exports.create = async (req, res) => {
         coupon_discount: couponDiscount
       })
 
-    // Log da atividade
-    await activityLogger.log(trx, {
-      type: 'order_created',
-      entity_type: 'order',
-      entity_id: order.id,
+    await activityLogger.log('order_created', 'order', order.id, {
       description: `Pedido ${order.code} criado com ${processedItems.length} item(ns)`,
-      metadata: {
-        customer_id,
-        total_items: processedItems.length,
-        estimated_days: deadline.estimatedDays
-      }
     })
 
     await trx.commit()
@@ -379,12 +370,8 @@ exports.updateStatus = async (req, res) => {
     }
 
     // Log da atividade
-    await activityLogger.log(db, {
-      type: 'order_status_updated',
-      entity_type: 'order',
-      entity_id: id,
+    await activityLogger.log('order_updated', 'order', id, {
       description: `Status do pedido alterado para: ${status}`,
-      metadata: { new_status: status }
     })
 
     res.json(order)
