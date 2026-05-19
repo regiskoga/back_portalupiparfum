@@ -7,10 +7,12 @@ exports.seed = async function(knex) {
   console.log('⚠️  Seed de migração SQLite desabilitado.')
   console.log('   Inserindo dados de exemplo...')
 
-  // Deletar na ordem correta respeitando FKs
-  await knex('formula_items').del()
-  await knex('supplies').del()
-  await knex('suppliers').del()
+  // Guard: não re-inserir se já existem dados
+  const { count } = await knex('suppliers').count('* as count').first()
+  if (parseInt(count) > 0) {
+    console.log('⏭️  Fornecedores já existem — seed 001 ignorado.')
+    return
+  }
 
   await knex('suppliers').insert([
     { name: 'Aromax Essências', tax_id: '12.345.678/0001-90', contact: 'Carlos Silva', email: 'carlos@aromax.com.br', phone: '(11) 9 8888-0001', address: 'Rua das Flores, 123 - São Paulo/SP', type: 'Essence' },

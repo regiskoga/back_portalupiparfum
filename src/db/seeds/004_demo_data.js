@@ -9,9 +9,10 @@ exports.seed = async function (knex) {
   try {
     // ══════════════════════════════════════════════════════
     // FORNECEDORES
+    // Guarda por nome — seed 001 pode ter inserido outros fornecedores
     // ══════════════════════════════════════════════════════
-    const { count: suppliersCount } = await knex('suppliers').count('* as count').first()
-    if (parseInt(suppliersCount) === 0) {
+    const hasOurSuppliers = await knex('suppliers').where('name', 'Aroma Mix Essências').first()
+    if (!hasOurSuppliers) {
       await knex('suppliers').insert([
         { name: 'Aroma Mix Essências',          type: 'Essence',   contact: 'Carlos Silva',    email: 'vendas@aromamix.com.br',          phone: '(11) 9 8765-4321', address: 'Rua das Essências, 100 — São Paulo/SP',     active: true },
         { name: 'Fragrance World Brasil',        type: 'Essence',   contact: 'Ana Lima',        email: 'comercial@fragranceworld.com.br',  phone: '(21) 9 7654-3210', address: 'Av. Atlântica, 500 — Rio de Janeiro/RJ',    active: true },
@@ -34,18 +35,26 @@ exports.seed = async function (knex) {
     // ══════════════════════════════════════════════════════
     const { count: suppliesCount } = await knex('supplies').count('* as count').first()
     if (parseInt(suppliesCount) === 0) {
-      const allSuppliers = await knex('suppliers').select('id', 'name')
-      const sid = {}
-      allSuppliers.forEach(s => {
-        if (s.name.includes('Aroma Mix'))            sid.aromamix   = s.id
-        else if (s.name.includes('Fragrance World')) sid.fragworld  = s.id
-        else if (s.name.includes('Silva & Cia'))     sid.silvacia   = s.id
-        else if (s.name.includes('Galvão'))          sid.galvao     = s.id
-        else if (s.name.includes('QuimiChem'))       sid.quimichem  = s.id
-        else if (s.name.includes('Nordeste'))        sid.nordeste   = s.id
-        else if (s.name.includes('Frascoo'))         sid.frascoo    = s.id
-        else if (s.name.includes('Rótulo Arte'))     sid.rotulo     = s.id
-      })
+      const allSuppliers = await knex('suppliers').select('id', 'name', 'type')
+
+      // Busca por nome exato; fallback para qualquer fornecedor do mesmo tipo
+      const byName = (fragment) => allSuppliers.find(s => s.name.includes(fragment))?.id
+      const byType = (type)     => allSuppliers.find(s => s.type === type)?.id
+
+      const sid = {
+        aromamix:  byName('Aroma Mix')      || byType('Essence'),
+        fragworld: byName('Fragrance World') || byType('Essence'),
+        silvacia:  byName('Silva & Cia')     || byType('Essence'),
+        galvao:    byName('Galvão')          || byType('Base')     || byType('Chemical'),
+        quimichem: byName('QuimiChem')       || byType('Chemical'),
+        nordeste:  byName('Nordeste')        || byType('Chemical'),
+        frascoo:   byName('Frascoo')         || byType('Bottle')   || byType('Packaging'),
+        rotulo:    byName('Rótulo Arte')     || byType('Label')    || byType('Packaging'),
+      }
+
+      // Garantia final: se ainda undefined, usa o primeiro fornecedor disponível
+      const fallbackId = allSuppliers[0]?.id
+      Object.keys(sid).forEach(k => { if (!sid[k]) sid[k] = fallbackId })
 
       const now = new Date()
       await knex('supplies').insert([
