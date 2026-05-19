@@ -3,16 +3,16 @@
  */
 
 exports.seed = async function(knex) {
-  console.log('🧪 Inserindo produtos, fórmulas e lotes de exemplo...')
-  
+  console.log('🧪 Verificando produtos, fórmulas e lotes de exemplo...')
+
+  // Guard: não re-inserir se já existem dados
+  const { count } = await knex('products').count('* as count').first()
+  if (parseInt(count) > 0) {
+    console.log('⏭️  Produtos já existem — seed 002 ignorado.')
+    return
+  }
+
   try {
-    // Limpar tabelas (ordem reversa por causa das FKs)
-    await knex('batch_movements').del()
-    await knex('bottling_batches').del()
-    await knex('bottling_orders').del()
-    await knex('batches').del()
-    await knex('formula_items').del()
-    await knex('formulas').del()
     await knex('products').del()
     
     // ═══ PRODUTOS ═══
