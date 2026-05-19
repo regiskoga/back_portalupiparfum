@@ -31,7 +31,7 @@ router.get('/available-batches', ctrl.getAvailableBatches)
 router.get('/in-maceration', ctrl.getBatchesInMaceration)
 router.get('/:id', [param('id').isInt()], validate, ctrl.getOne)
 router.post('/', bottlingRules, validate, ctrl.create)
-router.put('/:id', [param('id').isInt(), ...updateBottlingRules], validate, ctrl.update)
+router.patch('/:id', [param('id').isInt(), ...updateBottlingRules], validate, ctrl.update)
 router.delete('/:id', [param('id').isInt()], validate, ctrl.remove)
 
 module.exports = router
