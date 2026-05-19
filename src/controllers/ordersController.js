@@ -223,11 +223,12 @@ exports.create = async (req, res) => {
         })
         .returning('*')
 
-      // Criar ordens automáticas
+      // Criar ordens automáticas (dentro da mesma trx para o FK order_id funcionar)
       const automaticOrders = await orderDecisionEngine.createAutomaticOrders(
         order.id,
         orderItem.id,
-        decision.actions
+        decision.actions,
+        trx
       )
 
       processedItems.push({

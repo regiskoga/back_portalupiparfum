@@ -293,44 +293,46 @@ class OrderDecisionEngine {
 
   /**
    * Cria as ordens automáticas baseadas nas ações da decisão
+   * @param {object} trx - Transação Knex (obrigatório — order_id só existe dentro da trx)
    */
-  async createAutomaticOrders(orderId, orderItemId, actions) {
+  async createAutomaticOrders(orderId, orderItemId, actions, trx) {
+    const conn = trx || db
     const createdOrders = []
 
     for (const action of actions) {
       switch (action.type) {
         case 'production_order':
-          const productionOrder = await db('production_orders').insert({
+          const productionOrder = await conn('production_orders').insert({
             order_id: orderId,
             order_item_id: orderItemId,
             formula_id: action.formula_id,
             quantity_ml: action.quantity_ml,
-            status: action.waitForPurchase ? 'Pending' : 'Pending',
+            status: 'Pending',
             notes: action.waitForPurchase ? 'Aguardando compra de insumos' : ''
           }).returning('*')
           createdOrders.push({ type: 'production', id: productionOrder[0].id })
           break
 
         case 'bottling_order':
-          const bottlingOrder = await db('bottling_orders').insert({
+          const bottlingOrder = await conn('bottling_orders').insert({
             order_id: orderId,
             order_item_id: orderItemId,
             batch_id: action.batch_id || null,
             product_id: action.product_id,
             volume_ml: action.volume_ml,
             quantity: action.quantity,
-            status: action.waitForProduction || action.waitForMaceration ? 'Pending' : 'Pending',
-            notes: action.waitForProduction 
-              ? 'Aguardando produção do lote' 
-              : action.waitForMaceration 
-                ? 'Aguardando maceração do lote' 
+            status: 'Pending',
+            notes: action.waitForProduction
+              ? 'Aguardando produção do lote'
+              : action.waitForMaceration
+                ? 'Aguardando maceração do lote'
                 : ''
           }).returning('*')
           createdOrders.push({ type: 'bottling', id: bottlingOrder[0].id })
           break
 
         case 'purchase_order':
-          const purchaseOrder = await db('purchase_orders').insert({
+          const purchaseOrder = await conn('purchase_orders').insert({
             order_id: orderId,
             order_item_id: orderItemId,
             supply_id: action.supply_id,
