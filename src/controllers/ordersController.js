@@ -355,7 +355,7 @@ exports.updateStatus = async (req, res) => {
     const { id } = req.params
     const { status } = req.body
 
-    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled']
+    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled', 'Finalizado']
     
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid status' })
@@ -459,6 +459,49 @@ exports.applyKit = async (req, res) => {
   } catch (error) {
     console.error('Error applying kit:', error)
     res.status(500).json({ error: 'Failed to apply kit' })
+  }
+}
+
+/**
+ * Edita um item do pedido (somente Pending ou Confirmed)
+ */
+exports.updateItem = async (req, res) => {
+  try {
+    const { orderId, itemId } = req.params
+    const { product_id, volume_ml, quantity, unit_price } = req.body
+
+    const order = await db('orders').where({ id: orderId }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+    if (!['Pending', 'Confirmed'].includes(order.status)) {
+      return res.status(400).json({ error: 'Só é possível editar itens quando o pedido está Pendente ou Confirmado' })
+    }
+
+    const item = await db('order_items').where({ id: itemId, order_id: orderId }).first()
+    if (!item) return res.status(404).json({ error: 'Item not found' })
+
+    const decision = await orderDecisionEngine.executeDecision({ product_id, volume_ml, quantity })
+
+    const [updated] = await db('order_items')
+      .where({ id: itemId })
+      .update({
+        product_id,
+        volume_ml,
+        quantity,
+        unit_price,
+        decision_status: decision.status,
+        estimated_days: decision.estimatedDays,
+        decision_notes: decision.notes,
+      })
+      .returning('*')
+
+    await activityLogger.log('order_updated', 'order', orderId, {
+      description: `Item ${itemId} do pedido ${order.code} atualizado`,
+    })
+
+    res.json(updated)
+  } catch (error) {
+    console.error('Error updating order item:', error)
+    res.status(500).json({ error: 'Failed to update order item' })
   }
 }
 

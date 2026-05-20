@@ -6,7 +6,7 @@
 const express = require('express')
 const router = express.Router()
 const ordersController = require('../controllers/ordersController')
-const { body } = require('express-validator')
+const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
 
 /**
@@ -66,7 +66,7 @@ router.patch(
   '/:id/status',
   [
     body('status')
-      .isIn(['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled'])
+      .isIn(['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled', 'Finalizado'])
       .withMessage('Invalid status')
   ],
   validate,
@@ -91,6 +91,24 @@ router.post(
   ],
   validate,
   ordersController.applyKit
+)
+
+/**
+ * PATCH /api/orders/:orderId/items/:itemId
+ * Edita um item do pedido (somente quando Pending ou Confirmed)
+ */
+router.patch(
+  '/:orderId/items/:itemId',
+  [
+    param('orderId').isInt(),
+    param('itemId').isInt(),
+    body('product_id').isInt({ min: 1 }).withMessage('product_id must be a valid integer'),
+    body('volume_ml').isFloat({ gt: 0 }).withMessage('volume_ml must be greater than 0'),
+    body('quantity').isInt({ min: 1 }).withMessage('quantity must be at least 1'),
+    body('unit_price').isFloat({ min: 0 }).withMessage('unit_price must be >= 0'),
+  ],
+  validate,
+  ordersController.updateItem
 )
 
 module.exports = router
