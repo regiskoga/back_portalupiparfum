@@ -355,7 +355,7 @@ exports.updateStatus = async (req, res) => {
     const { id } = req.params
     const { status } = req.body
 
-    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled', 'Finalizado']
+    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled']
     
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid status' })
