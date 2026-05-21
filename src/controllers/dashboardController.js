@@ -69,9 +69,15 @@ async function getOverview(req, res) {
       .limit(5)
 
     // Insumos com estoque baixo
+    const overviewParams = await db('parameters')
+      .whereIn('key', ['low_stock_supply_warning'])
+      .select('key', 'value')
+    const overviewParamsMap = Object.fromEntries(overviewParams.map(r => [r.key, parseFloat(r.value)]))
+    const overviewLowStockWarning = overviewParamsMap.low_stock_supply_warning ?? 100
+
     const lowStockSupplies = await db('supplies')
       .select('id', 'name', 'type', 'quantity_purchased', 'unit')
-      .where('quantity_purchased', '<', 100)
+      .where('quantity_purchased', '<', overviewLowStockWarning)
       .orderBy('quantity_purchased', 'asc')
       .limit(10)
 
@@ -310,18 +316,31 @@ async function getProductionDashboard(req, res) {
 // ─── ALERTS DASHBOARD ─────────────────────────────────────────────────────────
 async function getAlerts(req, res) {
   try {
+    const paramsRows = await db('parameters').select('key', 'value')
+    const p = Object.fromEntries(paramsRows.map(r => [r.key, parseFloat(r.value)]))
+
+    const lowStockSupplyWarning   = p.low_stock_supply_warning   ?? 100
+    const lowStockSupplyCritical  = p.low_stock_supply_critical  ?? 50
+    const lowStockBatchMl         = p.low_stock_batch_ml         ?? 500
+    const profitMarginMinPct      = p.profit_margin_minimum_pct  ?? 30
+    const profitMarginWarningPct  = p.profit_margin_warning_pct  ?? 20
+    const macerationAlertDays     = p.maceration_alert_days      ?? 3
+    const criticalSupplyQty       = p.critical_supply_qty        ?? 200
+    const criticalSupplyFormulas  = p.critical_supply_formulas_min ?? 3
+    const highDemandOrdersMin     = p.high_demand_orders_min     ?? 5
+
     const alerts = []
 
-    // 1. Insumos com estoque abaixo do mínimo (configurado como 100 unidades)
+    // 1. Insumos com estoque abaixo do mínimo
     const lowStockSupplies = await db('supplies')
       .select('id', 'name', 'type', 'quantity_purchased', 'unit')
-      .where('quantity_purchased', '<', 100)
+      .where('quantity_purchased', '<', lowStockSupplyWarning)
       .orderBy('quantity_purchased', 'asc')
 
     lowStockSupplies.forEach(supply => {
       alerts.push({
         type: 'low_stock',
-        severity: supply.quantity_purchased < 50 ? 'critical' : 'warning',
+        severity: supply.quantity_purchased < lowStockSupplyCritical ? 'critical' : 'warning',
         title: 'Estoque baixo de insumo',
         message: `${supply.name} está com apenas ${supply.quantity_purchased}${supply.unit} em estoque`,
         entity_type: 'supply',
@@ -341,7 +360,7 @@ async function getAlerts(req, res) {
       .where('o.created_at', '>=', db.raw("NOW() - INTERVAL '30 days'"))
       .where('o.status', '!=', 'Cancelled')
       .groupBy('oi.product_name')
-      .having(db.raw('COUNT(*)'), '>=', 5)
+      .having(db.raw('COUNT(*)'), '>=', highDemandOrdersMin)
 
     for (const product of highDemandProducts) {
       // Verificar estoque disponível (lotes prontos para envase)
@@ -355,7 +374,7 @@ async function getAlerts(req, res) {
 
       const totalMl = availableStock?.total_ml || 0
 
-      if (totalMl < 500) {
+      if (totalMl < lowStockBatchMl) {
         alerts.push({
           type: 'high_demand_low_stock',
           severity: totalMl === 0 ? 'critical' : 'warning',
@@ -368,7 +387,7 @@ async function getAlerts(req, res) {
       }
     }
 
-    // 3. Sugestão de reprecificação (margem abaixo de 30%)
+    // 3. Sugestão de reprecificação
     const lowMarginProducts = await db('bottlings as bt')
       .leftJoin('order_items as oi', function() {
         this.on('oi.product_name', '=', 'bt.product_name')
@@ -384,28 +403,28 @@ async function getAlerts(req, res) {
 
     lowMarginProducts.forEach(product => {
       const margin = ((product.avg_price - product.avg_cost) / product.avg_price) * 100
-      
-      if (margin < 30 && margin > 0) {
-        const suggestedPrice = product.avg_cost / 0.7 // Margem de 30%
-        
+
+      if (margin < profitMarginMinPct && margin > 0) {
+        const suggestedPrice = product.avg_cost / (1 - profitMarginMinPct / 100)
+
         alerts.push({
           type: 'repricing_suggestion',
-          severity: margin < 20 ? 'warning' : 'info',
+          severity: margin < profitMarginWarningPct ? 'warning' : 'info',
           title: 'Sugestão de reprecificação',
-          message: `${product.product_name} está com margem de ${margin.toFixed(1)}% (abaixo de 30%)`,
+          message: `${product.product_name} está com margem de ${margin.toFixed(1)}% (abaixo de ${profitMarginMinPct}%)`,
           entity_type: 'product',
           entity_name: product.product_name,
           current_price: parseFloat(product.avg_price).toFixed(2),
           current_cost: parseFloat(product.avg_cost).toFixed(2),
           current_margin: margin.toFixed(2),
           suggested_price: suggestedPrice.toFixed(2),
-          suggested_margin: '30.00',
+          suggested_margin: profitMarginMinPct.toFixed(2),
           action_required: 'Considerar aumento de preço'
         })
       }
     })
 
-    // 4. Lotes próximos de liberar da maceração (próximos 3 dias)
+    // 4. Lotes próximos de liberar da maceração
     const upcomingBatches = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
       .join('products as p', 'p.id', 'f.product_id')
@@ -419,7 +438,7 @@ async function getAlerts(req, res) {
       .where('b.status', 'Em maceração')
       .whereBetween('b.maceration_end', [
         db.fn.now(),
-        db.raw("NOW() + INTERVAL '3 days'")
+        db.raw(`NOW() + INTERVAL '${macerationAlertDays} days'`)
       ])
       .orderBy('b.maceration_end', 'asc')
 
@@ -451,9 +470,9 @@ async function getAlerts(req, res) {
         db.raw('COUNT(DISTINCT fi.formula_id) as used_in_formulas'),
         db.raw('AVG(fi.percentage) as avg_usage_percentage')
       )
-      .where('s.quantity_purchased', '<', 200)
+      .where('s.quantity_purchased', '<', criticalSupplyQty)
       .groupBy('s.id', 's.name', 's.type', 's.quantity_purchased', 's.unit')
-      .havingRaw('COUNT(DISTINCT fi.formula_id) >= 3')
+      .havingRaw(`COUNT(DISTINCT fi.formula_id) >= ${criticalSupplyFormulas}`)
 
     criticalSupplies.forEach(supply => {
       alerts.push({
