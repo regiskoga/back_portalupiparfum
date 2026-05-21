@@ -169,12 +169,20 @@ async function update (req, res) {
 // ─── DELETE ───────────────────────────────────────────────────────────────────
 async function remove (req, res) {
   try {
-    const supply = await db('supplies').where({ id: parseInt(req.params.id) }).first()
+    const id = parseInt(req.params.id)
+    const supply = await db('supplies').where({ id }).first()
     if (!supply) {
       return res.status(404).json({ error: 'Supply not found' })
     }
 
-    await db('supplies').where({ id: parseInt(req.params.id) }).del()
+    const usedInFormulas = await db('formula_items').where({ supply_id: id }).count('* as total').first()
+    if (parseInt(usedInFormulas.total) > 0) {
+      return res.status(409).json({
+        error: `Insumo não pode ser excluído pois está sendo usado em ${usedInFormulas.total} fórmula(s). Remova-o das fórmulas antes de excluí-lo.`
+      })
+    }
+
+    await db('supplies').where({ id }).del()
     res.json({ message: 'Supply removed successfully' })
   } catch (e) {
     res.status(500).json({ error: e.message })
