@@ -272,7 +272,7 @@ exports.seed = async function (knex) {
         .slice(0, 10 - existingBatchCount)
 
       if (batchDefs.length > 0) {
-        await knex('batches').insert(batchDefs)
+        await knex('batches').insert(batchDefs).onConflict('batch_code').ignore()
         console.log(`✅ ${batchDefs.length} lotes inseridos`)
       }
     }
