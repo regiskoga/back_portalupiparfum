@@ -162,20 +162,30 @@ async function update(req, res) {
 // ─── DELETE PRODUCT ───────────────────────────────────────────────────────────
 async function remove(req, res) {
   try {
-    const product = await db('products').where('id', parseInt(req.params.id)).first()
+    const id = parseInt(req.params.id)
+    const product = await db('products').where('id', id).first()
     if (!product) {
       return res.status(404).json({ error: 'Product not found' })
     }
-    
-    await db('products').where('id', parseInt(req.params.id)).del()
 
-    await ActivityLogger.logDelete('product', product.id, product.project_name, product)
+    const bottlingOrderCount = await db('bottling_orders').where({ product_id: id }).count('* as total').first()
+    if (parseInt(bottlingOrderCount.total) > 0) {
+      return res.status(409).json({ error: 'Produto não pode ser excluído pois está vinculado a ordens de envase.' })
+    }
 
+    // formulas tem CASCADE mas batches tem RESTRICT em formulas — verifica indiretamente
+    const batchViaFormulaCount = await db('batches as b')
+      .join('formulas as f', 'f.id', 'b.formula_id')
+      .where('f.product_id', id)
+      .count('* as total').first()
+    if (parseInt(batchViaFormulaCount.total) > 0) {
+      return res.status(409).json({ error: 'Produto não pode ser excluído pois possui lotes de produção vinculados. Exclua os lotes primeiro.' })
+    }
+
+    await db('products').where('id', id).del()
+    await ActivityLogger.logDelete('product', id, product.project_name, product)
     res.json({ message: 'Product deleted successfully' })
   } catch (error) {
-    if (error.message?.includes('FOREIGN KEY') || error.message?.includes('foreign key') || error.message?.includes('constraint failed')) {
-      return res.status(400).json({ error: 'Não é possível deletar: existem lotes ou pedidos vinculados a este projeto.' })
-    }
     res.status(500).json({ error: error.message })
   }
 }

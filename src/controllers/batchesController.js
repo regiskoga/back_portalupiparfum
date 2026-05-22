@@ -353,19 +353,30 @@ async function update(req, res) {
 // ─── DELETE BATCH ─────────────────────────────────────────────────────────────
 async function remove(req, res) {
   try {
-    const batch = await db('batches').where('id', parseInt(req.params.id)).first()
+    const id = parseInt(req.params.id)
+    const batch = await db('batches').where('id', id).first()
     if (!batch) {
       return res.status(404).json({ error: 'Batch not found' })
     }
-    
-    // Verificar se lote foi usado (remaining_ml < quantity_ml)
-    if (parseFloat(batch.remaining_ml) < parseFloat(batch.quantity_ml)) {
-      return res.status(400).json({ 
-        error: 'Cannot delete batch that has been partially used' 
-      })
+
+    const bottlingBatches = await db('bottling_batches').where({ batch_id: id }).count('* as total').first()
+    if (parseInt(bottlingBatches.total) > 0) {
+      return res.status(409).json({ error: 'Lote não pode ser excluído pois foi utilizado em envase(s).' })
     }
-    
-    await db('batches').where('id', parseInt(req.params.id)).del()
+
+    const transfers = await db('batch_transfers')
+      .where('source_batch_id', id).orWhere('destination_batch_id', id)
+      .count('* as total').first()
+    if (parseInt(transfers.total) > 0) {
+      return res.status(409).json({ error: 'Lote não pode ser excluído pois possui transferências registradas.' })
+    }
+
+    const bottlingOrders = await db('bottling_orders').where({ batch_id: id }).count('* as total').first()
+    if (parseInt(bottlingOrders.total) > 0) {
+      return res.status(409).json({ error: 'Lote não pode ser excluído pois está vinculado a ordens de envase.' })
+    }
+
+    await db('batches').where('id', id).del()
     res.json({ message: 'Batch deleted successfully' })
   } catch (error) {
     res.status(500).json({ error: error.message })

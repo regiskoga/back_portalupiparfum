@@ -202,20 +202,23 @@ async function update(req, res) {
 // ─── DELETE FORMULA ───────────────────────────────────────────────────────────
 async function remove(req, res) {
   try {
-    const formula = await db('formulas').where('id', parseInt(req.params.id)).first()
+    const id = parseInt(req.params.id)
+    const formula = await db('formulas').where('id', id).first()
     if (!formula) {
       return res.status(404).json({ error: 'Formula not found' })
     }
-    
-    // Verificar se há lotes vinculados
-    const batchCount = await db('batches').where('formula_id', parseInt(req.params.id)).count('id as count').first()
-    if (parseInt(batchCount.count) > 0) {
-      return res.status(400).json({ 
-        error: 'Cannot delete formula with existing batches. Delete batches first.' 
-      })
+
+    const batchCount = await db('batches').where({ formula_id: id }).count('* as total').first()
+    if (parseInt(batchCount.total) > 0) {
+      return res.status(409).json({ error: `Fórmula não pode ser excluída pois possui ${batchCount.total} lote(s) vinculado(s). Exclua os lotes primeiro.` })
     }
-    
-    await db('formulas').where('id', parseInt(req.params.id)).del()
+
+    const productionOrderCount = await db('production_orders').where({ formula_id: id }).count('* as total').first()
+    if (parseInt(productionOrderCount.total) > 0) {
+      return res.status(409).json({ error: `Fórmula não pode ser excluída pois está vinculada a ${productionOrderCount.total} ordem(ns) de produção.` })
+    }
+
+    await db('formulas').where('id', id).del()
     res.json({ message: 'Formula deleted successfully' })
   } catch (error) {
     res.status(500).json({ error: error.message })

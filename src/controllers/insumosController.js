@@ -182,6 +182,13 @@ async function remove (req, res) {
       })
     }
 
+    const purchaseOrderCount = await db('purchase_orders').where({ supply_id: id }).count('* as total').first()
+    if (parseInt(purchaseOrderCount.total) > 0) {
+      return res.status(409).json({
+        error: `Insumo não pode ser excluído pois está vinculado a ${purchaseOrderCount.total} ordem(ns) de compra.`
+      })
+    }
+
     await db('supplies').where({ id }).del()
     res.json({ message: 'Supply removed successfully' })
   } catch (e) {
