@@ -23,7 +23,7 @@ router.get('/debug/users-table', async (req, res) => {
 })
 
 // Rotas protegidas
-router.post('/logout', authenticate, controller.logout)
+router.post('/logout', controller.logout)
 router.get('/verify', authenticate, controller.verifySession)
 router.post('/change-password', authenticate, controller.changePassword)
 

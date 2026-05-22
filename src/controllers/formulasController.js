@@ -99,7 +99,7 @@ async function create(req, res) {
       // Total = essência + demais insumos
       const essencePct = parseFloat(essence_percentage) || 0
       const itemsTotal = items.reduce((sum, item) => sum + parseFloat(item.percentage), 0)
-      const totalPercentage = essencePct + itemsTotal
+      const totalPercentage = itemsTotal
       const validated = Math.abs(totalPercentage - 100) < 0.01
 
       // Criar fórmula
@@ -163,9 +163,8 @@ async function update(req, res) {
 
       // Se itens foram fornecidos, recalcular percentual total
       if (items) {
-        const essencePct = essence_percentage !== undefined ? (parseFloat(essence_percentage) || 0) : parseFloat(formula.essence_percentage || 0)
         const itemsTotal = items.reduce((sum, item) => sum + parseFloat(item.percentage), 0)
-        const totalPercentage = essencePct + itemsTotal
+        const totalPercentage = itemsTotal
         updateData.total_percentage = totalPercentage
         updateData.validated = Math.abs(totalPercentage - 100) < 0.01
         
@@ -236,7 +235,7 @@ async function validate(req, res) {
     // Recalcular percentual total (essência + itens)
     const items = await db('formula_items').where('formula_id', parseInt(req.params.id))
     const itemsTotal = items.reduce((sum, item) => sum + parseFloat(item.percentage), 0)
-    const totalPercentage = parseFloat(formula.essence_percentage || 0) + itemsTotal
+    const totalPercentage = itemsTotal
     const validated = Math.abs(totalPercentage - 100) < 0.01
     
     const [updated] = await db('formulas')
