@@ -198,7 +198,7 @@ async function create(req, res) {
 
     // Calcular volume total do lote a partir das essências (se informadas)
     let quantity_ml = parseFloat(providedQty) || 0
-    if (essences.length > 0 && parseFloat(formula.essence_percentage) > 0) {
+    if (!quantity_ml && essences.length > 0 && parseFloat(formula.essence_percentage) > 0) {
       const totalEssenceMl = essences.reduce((sum, e) => sum + parseFloat(e.quantity || 0), 0)
       quantity_ml = totalEssenceMl / (parseFloat(formula.essence_percentage) / 100)
     }
