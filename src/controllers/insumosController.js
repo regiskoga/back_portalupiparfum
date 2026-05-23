@@ -22,6 +22,7 @@ async function list (req, res) {
     if (supplier_id) query = query.where('s.supplier_id', Number(supplier_id))
     if (busca) query = query.where('s.name', 'like', `%${busca}%`)
     if (req.query.receipt_status) query = query.where('s.receipt_status', req.query.receipt_status)
+    if (req.query.is_open !== undefined) query = query.where('s.is_open', req.query.is_open === 'true')
 
     // Count total
     const countQuery = query.clone().clearSelect().clearOrder().count('* as total')
@@ -219,4 +220,21 @@ async function stats (req, res) {
   }
 }
 
-module.exports = { list, getOne, create, update, remove, stats }
+// ─── TOGGLE OPEN/CLOSED ───────────────────────────────────────────────────────
+async function toggleOpen (req, res) {
+  try {
+    const supply = await db('supplies').where({ id: parseInt(req.params.id) }).first()
+    if (!supply) return res.status(404).json({ error: 'Insumo não encontrado' })
+
+    const [updated] = await db('supplies')
+      .where({ id: parseInt(req.params.id) })
+      .update({ is_open: !supply.is_open, updated_at: db.fn.now() })
+      .returning('*')
+
+    res.json(updated)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
+module.exports = { list, getOne, create, update, remove, stats, toggleOpen }

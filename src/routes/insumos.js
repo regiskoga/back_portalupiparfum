@@ -28,6 +28,7 @@ router.post  ('/', supplyRules, validate, (req, res, next) => {
 }, ctrl.create)
 router.put   ('/:id', [param('id').isInt(), ...supplyRules], validate, ctrl.update)
 router.patch ('/:id', [param('id').isInt()], validate, ctrl.update)
+router.patch ('/:id/toggle-open', [param('id').isInt()], validate, ctrl.toggleOpen)
 router.delete('/:id', [param('id').isInt()], validate, ctrl.remove)
 
 module.exports = router

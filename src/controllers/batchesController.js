@@ -214,11 +214,21 @@ async function create(req, res) {
       .select('fi.supply_id', 'fi.percentage', 's.unit_cost')
       .where('fi.formula_id', parseInt(formula_id))
 
-    // Custo das essências
+    // Validar e calcular custo das essências
     let essenceCost = 0
     for (const e of essences) {
       const supply = await db('supplies').where('id', parseInt(e.supply_id)).first()
-      if (supply) essenceCost += parseFloat(supply.unit_cost || 0) * parseFloat(e.quantity || 0)
+      if (!supply) return res.status(400).json({ error: `Essência ID ${e.supply_id} não encontrada` })
+
+      const qtdUsada = parseFloat(e.quantity || 0)
+      const qtdDisponivel = parseFloat(supply.quantity_available || 0)
+      if (qtdUsada > qtdDisponivel) {
+        return res.status(400).json({
+          error: `Estoque insuficiente para "${supply.name}": disponível ${qtdDisponivel}${supply.unit}, solicitado ${qtdUsada}${supply.unit}`
+        })
+      }
+
+      essenceCost += parseFloat(supply.unit_cost || 0) * qtdUsada
     }
 
     // Custo dos demais insumos
@@ -277,7 +287,7 @@ async function create(req, res) {
         operator: 'system'
       })
 
-      // Registrar essências usadas
+      // Registrar essências usadas e decrementar estoque
       if (essences.length > 0) {
         const essenceRows = essences.map(e => ({
           batch_id:         batch.id,
@@ -288,6 +298,13 @@ async function create(req, res) {
           supplier_lot_ref: e.supplier_lot_ref || null,
         }))
         await trx('batch_essences').insert(essenceRows)
+
+        // Decrementar quantity_available de cada compra de essência utilizada
+        for (const e of essences) {
+          await trx('supplies')
+            .where('id', parseInt(e.supply_id))
+            .decrement('quantity_available', parseFloat(e.quantity))
+        }
       }
 
       return batch
