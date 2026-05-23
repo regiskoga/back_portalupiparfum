@@ -302,6 +302,7 @@ class OrderDecisionEngine {
     for (const action of actions) {
       switch (action.type) {
         case 'production_order':
+          if (!action.formula_id) break // sem fórmula → pula ordem de produção
           const productionOrder = await conn('production_orders').insert({
             order_id: orderId,
             order_item_id: orderItemId,
@@ -332,11 +333,12 @@ class OrderDecisionEngine {
           break
 
         case 'purchase_order':
+          if (!action.supply_id) break // sem insumo → pula ordem de compra
           const purchaseOrder = await conn('purchase_orders').insert({
             order_id: orderId,
             order_item_id: orderItemId,
             supply_id: action.supply_id,
-            supplier_id: action.supplier_id,
+            supplier_id: action.supplier_id || null,
             quantity_needed: action.quantity_needed,
             status: 'Pending'
           }).returning('*')
