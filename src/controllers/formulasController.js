@@ -94,6 +94,14 @@ async function create(req, res) {
       }
     }
 
+    // Gap #5: validar supply_ids antes de inserir
+    for (const item of items) {
+      const supply = await db('supplies').where('id', parseInt(item.supply_id)).first()
+      if (!supply) {
+        return res.status(400).json({ error: `Insumo ID ${item.supply_id} não encontrado` })
+      }
+    }
+
     // Usar transação para criar fórmula + itens
     const result = await db.transaction(async (trx) => {
       // Total = essência + demais insumos
@@ -153,6 +161,16 @@ async function update(req, res) {
     }
     
     const { name, description, essence_percentage, items } = req.body
+
+    // Gap #5: validar supply_ids antes de inserir
+    if (items) {
+      for (const item of items) {
+        const supply = await db('supplies').where('id', parseInt(item.supply_id)).first()
+        if (!supply) {
+          return res.status(400).json({ error: `Insumo ID ${item.supply_id} não encontrado` })
+        }
+      }
+    }
 
     const result = await db.transaction(async (trx) => {
       // Atualizar fórmula

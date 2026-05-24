@@ -249,18 +249,27 @@ exports.create = async (req, res) => {
         0
       )
 
+      // Gap #4: validar valor mínimo do pedido
+      const minOrderValue = parseFloat(coupon.min_order_value || 0)
+      if (minOrderValue > 0 && subtotal < minOrderValue) {
+        await trx.rollback()
+        return res.status(400).json({ error: `Valor mínimo do pedido para este cupom: R$ ${minOrderValue.toFixed(2)}` })
+      }
+
       switch (coupon.type) {
         case 'Percentage':
           couponDiscount = (subtotal * coupon.discount_value) / 100
           break
         case 'Fixed Amount':
-          couponDiscount = coupon.discount_value
+          couponDiscount = parseFloat(coupon.discount_value)
           break
-        case 'Progressive':
-          // Implementar lógica progressiva se necessário
-          couponDiscount = (subtotal * coupon.discount_value) / 100
+        case 'Progressive': {
+          // Aplica desconto somente sobre a parte que excede o valor mínimo
+          const excessAmount = Math.max(0, subtotal - minOrderValue)
+          couponDiscount = (excessAmount * coupon.discount_value) / 100
           break
-        case 'Buy X Get Y':
+        }
+        case 'Buy X Get Y': {
           // Implementar lógica de "leve X pague Y"
           const totalItems = processedItems.reduce((sum, item) => sum + item.quantity, 0)
           if (totalItems >= coupon.min_items) {
@@ -269,6 +278,7 @@ exports.create = async (req, res) => {
             couponDiscount = freeItems * avgPrice
           }
           break
+        }
       }
 
       // Atualizar uso do cupom
@@ -557,6 +567,12 @@ exports.linkBottling = async (req, res) => {
     if (bottling_id != null) {
       const bottling = await db('bottlings').where({ id: parseInt(bottling_id) }).first()
       if (!bottling) return res.status(404).json({ error: 'Envase não encontrado' })
+      // Gap #3: verificar estoque suficiente no envase
+      if (parseInt(bottling.quantity_available) < parseInt(item.quantity)) {
+        return res.status(400).json({
+          error: `Envase sem estoque suficiente: disponível ${bottling.quantity_available}, necessário ${item.quantity}`
+        })
+      }
     }
 
     const [updated] = await db('order_items')
@@ -608,6 +624,12 @@ exports.applyCoupon = async (req, res) => {
     const items    = await db('order_items').where({ order_id: id })
     const subtotal = items.reduce((s, i) => s + parseFloat(i.unit_price) * parseInt(i.quantity), 0)
 
+    // Gap #4: validar valor mínimo do pedido
+    const minOrderValue = parseFloat(coupon.min_order_value || 0)
+    if (minOrderValue > 0 && subtotal < minOrderValue) {
+      return res.status(400).json({ error: `Valor mínimo do pedido para este cupom: R$ ${minOrderValue.toFixed(2)}` })
+    }
+
     let couponDiscount = 0
     switch (coupon.type) {
       case 'Percentage':
@@ -616,9 +638,12 @@ exports.applyCoupon = async (req, res) => {
       case 'Fixed Amount':
         couponDiscount = parseFloat(coupon.discount_value)
         break
-      case 'Progressive':
-        couponDiscount = (subtotal * coupon.discount_value) / 100
+      case 'Progressive': {
+        // Aplica desconto somente sobre a parte que excede o valor mínimo
+        const excessAmount = Math.max(0, subtotal - minOrderValue)
+        couponDiscount = (excessAmount * coupon.discount_value) / 100
         break
+      }
       case 'Buy X Get Y': {
         const totalQty = items.reduce((s, i) => s + parseInt(i.quantity), 0)
         if (totalQty >= coupon.min_items) {

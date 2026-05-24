@@ -185,7 +185,7 @@ class OrderDecisionEngine {
     const batch = await db('batches')
       .where({ formula_id: formula.id })
       .where('status', 'Em maceração')
-      .where('quantity_ml', '>=', totalMlNeeded)
+      .where('remaining_ml', '>=', totalMlNeeded)
       .orderBy('maceration_end', 'asc')
       .first()
 

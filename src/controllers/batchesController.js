@@ -205,6 +205,15 @@ async function create(req, res) {
 
     if (quantity_ml <= 0) return res.status(400).json({ error: 'Quantity must be greater than 0' })
 
+    // Gap #7: limite de chorinho baseado no parâmetro de tolerância
+    const chorinhoPct = parseFloat(await getParam('chorinho_tolerance_pct', 5)) / 100
+    const maxChorinho = quantity_ml * chorinhoPct
+    if (chorinho_ml > maxChorinho) {
+      return res.status(400).json({
+        error: `Chorinho de ${chorinho_ml}ml excede o limite permitido de ${maxChorinho.toFixed(2)}ml (${(chorinhoPct * 100).toFixed(0)}% de ${quantity_ml}ml)`
+      })
+    }
+
     // Volume real = calculado + chorinho (sobra real da produção)
     const actual_ml = quantity_ml + chorinho_ml
 
@@ -219,6 +228,8 @@ async function create(req, res) {
     for (const e of essences) {
       const supply = await db('supplies').where('id', parseInt(e.supply_id)).first()
       if (!supply) return res.status(400).json({ error: `Essência ID ${e.supply_id} não encontrada` })
+      // Gap #1: impede uso de essência fechada em novo lote
+      if (!supply.is_open) return res.status(400).json({ error: `Essência "${supply.name}" está fechada e não pode ser usada em novos lotes` })
 
       const qtdUsada = parseFloat(e.quantity || 0)
       const qtdDisponivel = parseFloat(supply.quantity_available || 0)
@@ -301,9 +312,11 @@ async function create(req, res) {
 
         // Decrementar quantity_available de cada compra de essência utilizada
         for (const e of essences) {
-          await trx('supplies')
-            .where('id', parseInt(e.supply_id))
-            .decrement('quantity_available', parseFloat(e.quantity))
+          // Gap #6: GREATEST evita valor negativo
+          await trx.raw(
+            'UPDATE supplies SET quantity_available = GREATEST(0, quantity_available - ?) WHERE id = ?',
+            [parseFloat(e.quantity), parseInt(e.supply_id)]
+          )
 
           // Auto-fechar se esgotou
           const afterDecrement = await trx('supplies').where('id', parseInt(e.supply_id)).first()
