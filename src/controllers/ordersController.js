@@ -514,6 +514,40 @@ exports.updateItem = async (req, res) => {
 }
 
 /**
+ * Vincula (ou desvincula) um envase a um item do pedido — M16 rastreabilidade.
+ * Permite status: Confirmed, In Production, Ready.
+ */
+exports.linkBottling = async (req, res) => {
+  try {
+    const { orderId, itemId } = req.params
+    const { bottling_id } = req.body
+
+    const order = await db('orders').where({ id: parseInt(orderId) }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+    if (!['Confirmed', 'In Production', 'Ready'].includes(order.status)) {
+      return res.status(400).json({ error: 'Vínculo de envase só é permitido em pedidos Confirmados, Em Produção ou Prontos' })
+    }
+
+    const item = await db('order_items').where({ id: parseInt(itemId), order_id: parseInt(orderId) }).first()
+    if (!item) return res.status(404).json({ error: 'Item not found' })
+
+    if (bottling_id != null) {
+      const bottling = await db('bottlings').where({ id: parseInt(bottling_id) }).first()
+      if (!bottling) return res.status(404).json({ error: 'Envase não encontrado' })
+    }
+
+    const [updated] = await db('order_items')
+      .where({ id: parseInt(itemId) })
+      .update({ bottling_id: bottling_id != null ? parseInt(bottling_id) : null })
+      .returning('*')
+
+    res.json(updated)
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+}
+
+/**
  * Aplica ou remove um cupom em pedido Pendente/Confirmado
  */
 exports.applyCoupon = async (req, res) => {

@@ -20,8 +20,8 @@ async function generateBottlingCode () {
 // ─── LIST BOTTLINGS ───────────────────────────────────────────────────────────
 async function list(req, res) {
   try {
-    const { search, start_date, end_date } = req.query
-    
+    const { search, start_date, end_date, product_id, volume_ml } = req.query
+
     let query = db('bottlings as bt')
       .select(
         'bt.*',
@@ -31,7 +31,7 @@ async function list(req, res) {
       .leftJoin('supplies as bs', 'bs.id', 'bt.bottle_supply_id')
       .leftJoin('supplies as ls', 'ls.id', 'bt.label_supply_id')
       .orderBy('bt.bottling_date', 'desc')
-    
+
     // Filtros
     if (search) {
       query = query.where(function() {
@@ -40,11 +40,24 @@ async function list(req, res) {
           .orWhere('bt.product_ref', 'ilike', `%${search}%`)
       })
     }
-    
+
+    if (product_id) {
+      query = query.whereIn('bt.id', function () {
+        this.select('bb.bottling_id')
+          .from('bottling_batches as bb')
+          .join('batches as b', 'b.id', 'bb.batch_id')
+          .where('b.product_id', parseInt(product_id))
+      })
+    }
+
+    if (volume_ml) {
+      query = query.where('bt.volume_ml', parseFloat(volume_ml))
+    }
+
     if (start_date) {
       query = query.where('bt.bottling_date', '>=', start_date)
     }
-    
+
     if (end_date) {
       query = query.where('bt.bottling_date', '<=', end_date)
     }

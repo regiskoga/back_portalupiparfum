@@ -118,4 +118,19 @@ router.patch(
   ordersController.updateItem
 )
 
+/**
+ * PATCH /api/orders/:orderId/items/:itemId/bottling
+ * Vincula ou desvincula um envase a um item (M16 rastreabilidade)
+ */
+router.patch(
+  '/:orderId/items/:itemId/bottling',
+  [
+    param('orderId').isInt(),
+    param('itemId').isInt(),
+    body('bottling_id').optional({ nullable: true }).isInt({ min: 1 }).withMessage('bottling_id must be a positive integer'),
+  ],
+  validate,
+  ordersController.linkBottling
+)
+
 module.exports = router
