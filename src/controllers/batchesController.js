@@ -14,20 +14,20 @@ async function generateBatchCode (product_id, formula_id, production_date) {
   const paddedFormula = String(formula_id || 0).padStart(5, '0')
   const datePart = (production_date || new Date().toISOString().slice(0, 10)).replace(/-/g, '')
 
-  const { cnt } = await db('batches')
+  const { max } = await db('batches')
     .where('product_id', product_id)
-    .count('* as cnt')
+    .max('reduced_lot_number as max')
     .first()
 
-  const N = parseInt(cnt || 0) + 1
+  const N = parseInt(max || 0) + 1
   return `L_${paddedProject}_${paddedFormula}_${datePart}_${N}`
 }
 
 // ─── REDUCED LOT NUMBER ───────────────────────────────────────────────────────
 async function getNextReducedLotNumber (product_id) {
   if (!product_id) return 1
-  const { cnt } = await db('batches').where('product_id', product_id).count('* as cnt').first()
-  return parseInt(cnt || 0) + 1
+  const { max } = await db('batches').where('product_id', product_id).max('reduced_lot_number as max').first()
+  return parseInt(max || 0) + 1
 }
 
 // ─── LIST BATCHES ─────────────────────────────────────────────────────────────
@@ -304,6 +304,14 @@ async function create(req, res) {
           await trx('supplies')
             .where('id', parseInt(e.supply_id))
             .decrement('quantity_available', parseFloat(e.quantity))
+
+          // Auto-fechar se esgotou
+          const afterDecrement = await trx('supplies').where('id', parseInt(e.supply_id)).first()
+          if (parseFloat(afterDecrement.quantity_available || 0) <= 0) {
+            await trx('supplies')
+              .where('id', parseInt(e.supply_id))
+              .update({ is_open: false, quantity_available: 0 })
+          }
         }
       }
 
@@ -611,6 +619,55 @@ async function nextCode (req, res) {
   }
 }
 
+// ─── STOCK SUMMARY (saldo real por produto) ───────────────────────────────────
+async function stockSummary (req, res) {
+  try {
+    // ml disponível em lotes ativos por produto
+    const batchStock = await db('batches as b')
+      .leftJoin('products as p', 'p.id', 'b.product_id')
+      .select(
+        'b.product_id',
+        'p.project_name',
+        'p.commercial_name',
+        db.raw('COALESCE(SUM(b.remaining_ml), 0) as total_ml')
+      )
+      .whereNot('b.status', 'Finalizado')
+      .whereNotNull('b.product_id')
+      .groupBy('b.product_id', 'p.project_name', 'p.commercial_name')
+
+    // ml comprometido em pedidos ativos por produto
+    const ACTIVE_STATUSES = ['Pending', 'Confirmed', 'In Production', 'Ready']
+    const committed = await db('order_items as oi')
+      .join('orders as o', 'o.id', 'oi.order_id')
+      .select(
+        'oi.product_id',
+        db.raw('COALESCE(SUM(oi.volume_ml * oi.quantity), 0) as committed_ml')
+      )
+      .whereIn('o.status', ACTIVE_STATUSES)
+      .groupBy('oi.product_id')
+
+    const committedMap = {}
+    committed.forEach(r => { committedMap[r.product_id] = parseFloat(r.committed_ml || 0) })
+
+    const summary = batchStock.map(row => {
+      const total_ml     = parseFloat(row.total_ml || 0)
+      const committed_ml = committedMap[row.product_id] || 0
+      return {
+        product_id:     row.product_id,
+        project_name:   row.project_name,
+        commercial_name: row.commercial_name,
+        total_ml,
+        committed_ml,
+        available_ml: Math.max(0, total_ml - committed_ml),
+      }
+    })
+
+    res.json(summary)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
 module.exports = {
   list,
   getOne,
@@ -623,7 +680,8 @@ module.exports = {
   updateMacerationStatus,
   formulaInfo,
   mergeBatches,
-  nextCode
+  nextCode,
+  stockSummary,
 }
 
 

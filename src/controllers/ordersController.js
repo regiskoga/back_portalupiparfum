@@ -198,7 +198,7 @@ exports.create = async (req, res) => {
     const processedItems = []
 
     for (const item of items) {
-      const { product_id, volume_ml, quantity, unit_price } = item
+      const { product_id, volume_ml, quantity, unit_price, item_discount = 0 } = item
 
       // Executar motor de decisão
       const decision = await orderDecisionEngine.executeDecision({
@@ -217,6 +217,7 @@ exports.create = async (req, res) => {
           volume_ml,
           quantity,
           unit_price,
+          item_discount: parseFloat(item_discount) || 0,
           decision_status: decision.status,
           estimated_days: decision.estimatedDays,
           decision_notes: decision.notes
@@ -353,17 +354,21 @@ exports.checkGifts = async (req, res) => {
 exports.updateStatus = async (req, res) => {
   try {
     const { id } = req.params
-    const { status } = req.body
+    const { status, discount, notes } = req.body
 
     const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled']
-    
+
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid status' })
     }
 
+    const updateData = { status, updated_at: db.fn.now() }
+    if (discount !== undefined) updateData.discount = parseFloat(discount) || 0
+    if (notes    !== undefined) updateData.notes    = notes
+
     const [order] = await db('orders')
       .where({ id })
-      .update({ status, updated_at: db.fn.now() })
+      .update(updateData)
       .returning('*')
 
     if (!order) {
@@ -468,7 +473,7 @@ exports.applyKit = async (req, res) => {
 exports.updateItem = async (req, res) => {
   try {
     const { orderId, itemId } = req.params
-    const { product_id, volume_ml, quantity, unit_price } = req.body
+    const { product_id, volume_ml, quantity, unit_price, item_discount } = req.body
 
     const order = await db('orders').where({ id: orderId }).first()
     if (!order) return res.status(404).json({ error: 'Order not found' })
@@ -481,17 +486,20 @@ exports.updateItem = async (req, res) => {
 
     const decision = await orderDecisionEngine.executeDecision({ product_id, volume_ml, quantity })
 
+    const updateData = {
+      product_id,
+      volume_ml,
+      quantity,
+      unit_price,
+      decision_status: decision.status,
+      estimated_days: decision.estimatedDays,
+      decision_notes: decision.notes,
+    }
+    if (item_discount !== undefined) updateData.item_discount = parseFloat(item_discount) || 0
+
     const [updated] = await db('order_items')
       .where({ id: itemId })
-      .update({
-        product_id,
-        volume_ml,
-        quantity,
-        unit_price,
-        decision_status: decision.status,
-        estimated_days: decision.estimatedDays,
-        decision_notes: decision.notes,
-      })
+      .update(updateData)
       .returning('*')
 
     await activityLogger.log('order_updated', 'order', orderId, {
@@ -502,6 +510,77 @@ exports.updateItem = async (req, res) => {
   } catch (error) {
     console.error('Error updating order item:', error)
     res.status(500).json({ error: 'Failed to update order item' })
+  }
+}
+
+/**
+ * Aplica ou remove um cupom em pedido Pendente/Confirmado
+ */
+exports.applyCoupon = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { coupon_code } = req.body
+
+    const order = await db('orders').where({ id }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+    if (!['Pending', 'Confirmed'].includes(order.status)) {
+      return res.status(400).json({ error: 'Cupom só pode ser aplicado em pedidos Pendente ou Confirmado' })
+    }
+
+    // Remover cupom
+    if (!coupon_code) {
+      const [updated] = await db('orders').where({ id })
+        .update({ coupon_id: null, coupon_discount: 0, updated_at: db.fn.now() })
+        .returning('*')
+      return res.json({ ...updated, coupon_discount: 0 })
+    }
+
+    const coupon = await db('coupons')
+      .where({ code: coupon_code.trim().toUpperCase(), active: true })
+      .where('valid_from', '<=', db.fn.now())
+      .where(function () {
+        this.whereNull('valid_until').orWhere('valid_until', '>=', db.fn.now())
+      })
+      .first()
+
+    if (!coupon) return res.status(400).json({ error: 'Cupom inválido ou expirado' })
+    if (coupon.max_uses && coupon.current_uses >= coupon.max_uses) {
+      return res.status(400).json({ error: 'Limite de usos do cupom atingido' })
+    }
+
+    const items    = await db('order_items').where({ order_id: id })
+    const subtotal = items.reduce((s, i) => s + parseFloat(i.unit_price) * parseInt(i.quantity), 0)
+
+    let couponDiscount = 0
+    switch (coupon.type) {
+      case 'Percentage':
+        couponDiscount = (subtotal * coupon.discount_value) / 100
+        break
+      case 'Fixed Amount':
+        couponDiscount = parseFloat(coupon.discount_value)
+        break
+      case 'Progressive':
+        couponDiscount = (subtotal * coupon.discount_value) / 100
+        break
+      case 'Buy X Get Y': {
+        const totalQty = items.reduce((s, i) => s + parseInt(i.quantity), 0)
+        if (totalQty >= coupon.min_items) {
+          const free    = Math.floor(totalQty / coupon.min_items) * coupon.free_items
+          const avgPrc  = totalQty > 0 ? subtotal / totalQty : 0
+          couponDiscount = free * avgPrc
+        }
+        break
+      }
+    }
+
+    const [updated] = await db('orders').where({ id })
+      .update({ coupon_id: coupon.id, coupon_discount: couponDiscount, updated_at: db.fn.now() })
+      .returning('*')
+
+    res.json({ ...updated, coupon_code: coupon.code, coupon_type: coupon.type, coupon_discount: couponDiscount })
+  } catch (error) {
+    console.error('Error applying coupon:', error)
+    res.status(500).json({ error: error.message })
   }
 }
 

@@ -23,6 +23,7 @@ async function list (req, res) {
     if (busca) query = query.where('s.name', 'like', `%${busca}%`)
     if (req.query.receipt_status) query = query.where('s.receipt_status', req.query.receipt_status)
     if (req.query.is_open !== undefined) query = query.where('s.is_open', req.query.is_open === 'true')
+    if (req.query.is_formula_ingredient !== undefined) query = query.where('s.is_formula_ingredient', req.query.is_formula_ingredient === 'true')
 
     // Count total
     const countQuery = query.clone().clearSelect().clearOrder().count('* as total')
@@ -105,6 +106,8 @@ async function create (req, res) {
       purchase_date: purchase_date || new Date().toISOString().slice(0, 10),
       receipt_status: req.body.receipt_status || 'Recebido',
       bottle_type: req.body.bottle_type || '',
+      quantity_available: Number(quantity_purchased),
+      is_formula_ingredient: req.body.is_formula_ingredient === true || req.body.is_formula_ingredient === 'true',
     }
 
     const result = await db('supplies').insert(insertData).returning('*')
@@ -151,6 +154,7 @@ async function update (req, res) {
     if (purchase_date !== undefined) updateData.purchase_date = purchase_date || null
     if (req.body.receipt_status !== undefined) updateData.receipt_status = req.body.receipt_status
     if (req.body.bottle_type    !== undefined) updateData.bottle_type    = req.body.bottle_type
+    if (req.body.is_formula_ingredient !== undefined) updateData.is_formula_ingredient = req.body.is_formula_ingredient === true || req.body.is_formula_ingredient === 'true'
     updateData.updated_at = db.fn.now()
 
     await db('supplies').where({ id: parseInt(req.params.id) }).update(updateData)

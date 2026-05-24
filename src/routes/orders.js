@@ -63,6 +63,13 @@ router.post(
  * Atualiza status do pedido
  */
 router.patch(
+  '/:id/coupon',
+  [param('id').isInt(), body('coupon_code').optional({ nullable: true }).isString()],
+  validate,
+  ordersController.applyCoupon
+)
+
+router.patch(
   '/:id/status',
   [
     body('status')
