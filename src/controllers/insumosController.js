@@ -146,7 +146,11 @@ async function update (req, res) {
     if (type !== undefined) updateData.type = type
     if (supplier_id !== undefined) updateData.supplier_id = Number(supplier_id)
     if (unit !== undefined) updateData.unit = unit
-    if (quantity_purchased !== undefined) updateData.quantity_purchased = Number(quantity_purchased)
+    if (quantity_purchased !== undefined) {
+      const delta = Number(quantity_purchased) - Number(supply.quantity_purchased)
+      updateData.quantity_purchased = Number(quantity_purchased)
+      updateData.quantity_available = Math.max(0, Number(supply.quantity_available) + delta)
+    }
     if (total_amount_paid !== undefined) updateData.total_amount_paid = Number(total_amount_paid)
     if (batch !== undefined) updateData.batch = batch
     if (notes !== undefined) updateData.notes = notes
@@ -191,6 +195,13 @@ async function remove (req, res) {
     if (parseInt(purchaseOrderCount.total) > 0) {
       return res.status(409).json({
         error: `Insumo não pode ser excluído pois está vinculado a ${purchaseOrderCount.total} ordem(ns) de compra.`
+      })
+    }
+
+    const batchEssenceCount = await db('batch_essences').where({ supply_id: id }).count('* as total').first()
+    if (parseInt(batchEssenceCount.total) > 0) {
+      return res.status(409).json({
+        error: `Insumo não pode ser excluído pois está vinculado a ${batchEssenceCount.total} lote(s) de produção. Exclua os lotes antes de excluí-lo.`
       })
     }
 
