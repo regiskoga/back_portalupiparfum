@@ -349,7 +349,9 @@ exports.checkGifts = async (req, res) => {
 }
 
 /**
- * Atualiza status do pedido
+ * Atualiza status do pedido.
+ * Ao marcar Delivered: decrementa quantity_available dos envases vinculados.
+ * Ao cancelar depois de Delivered: restaura o estoque dos envases.
  */
 exports.updateStatus = async (req, res) => {
   try {
@@ -357,30 +359,51 @@ exports.updateStatus = async (req, res) => {
     const { status, discount, notes } = req.body
 
     const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled']
-
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid status' })
     }
+
+    const order = await db('orders').where({ id }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
 
     const updateData = { status, updated_at: db.fn.now() }
     if (discount !== undefined) updateData.discount = parseFloat(discount) || 0
     if (notes    !== undefined) updateData.notes    = notes
 
-    const [order] = await db('orders')
-      .where({ id })
-      .update(updateData)
-      .returning('*')
+    const [updated] = await db.transaction(async (trx) => {
+      // ── Entrega: debitar estoque dos envases vinculados ──────────────────
+      if (status === 'Delivered' && !order.stock_decremented) {
+        const items = await trx('order_items').where({ order_id: id })
+        for (const item of items) {
+          if (!item.bottling_id) continue
+          await trx.raw(
+            'UPDATE bottlings SET quantity_available = GREATEST(0, quantity_available - ?) WHERE id = ?',
+            [parseInt(item.quantity), item.bottling_id]
+          )
+        }
+        updateData.stock_decremented = true
+      }
 
-    if (!order) {
-      return res.status(404).json({ error: 'Order not found' })
-    }
+      // ── Cancelamento após entrega: restaurar estoque dos envases ─────────
+      if (status === 'Cancelled' && order.stock_decremented) {
+        const items = await trx('order_items').where({ order_id: id })
+        for (const item of items) {
+          if (!item.bottling_id) continue
+          await trx('bottlings')
+            .where({ id: item.bottling_id })
+            .increment('quantity_available', parseInt(item.quantity))
+        }
+        updateData.stock_decremented = false
+      }
 
-    // Log da atividade
+      return trx('orders').where({ id }).update(updateData).returning('*')
+    })
+
     await activityLogger.log('order_updated', 'order', id, {
       description: `Status do pedido alterado para: ${status}`,
     })
 
-    res.json(order)
+    res.json(updated)
   } catch (error) {
     console.error('Error updating order status:', error)
     res.status(500).json({ error: 'Failed to update order status' })
