@@ -4,8 +4,7 @@ const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
 
 const supplierRules = [
-  body('name').trim().notEmpty().withMessage('Name is required'),
-  body('email').optional({ checkFalsy: true }).isEmail().withMessage('Invalid email'),
+  body('name').trim().notEmpty().withMessage('Nome é obrigatório'),
 ]
 
 router.get   ('/',              ctrl.list)
