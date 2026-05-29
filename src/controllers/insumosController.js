@@ -107,7 +107,7 @@ async function create (req, res) {
       receipt_status: req.body.receipt_status || 'Recebido',
       bottle_type: req.body.bottle_type || '',
       quantity_available: Number(quantity_purchased),
-      is_formula_ingredient: req.body.is_formula_ingredient === true || req.body.is_formula_ingredient === 'true',
+      is_formula_ingredient: ['Essence', 'Base', 'Chemical'].includes(type) || req.body.is_formula_ingredient === true || req.body.is_formula_ingredient === 'true',
     }
 
     const result = await db('supplies').insert(insertData).returning('*')
@@ -158,7 +158,8 @@ async function update (req, res) {
     if (purchase_date !== undefined) updateData.purchase_date = purchase_date || null
     if (req.body.receipt_status !== undefined) updateData.receipt_status = req.body.receipt_status
     if (req.body.bottle_type    !== undefined) updateData.bottle_type    = req.body.bottle_type
-    if (req.body.is_formula_ingredient !== undefined) updateData.is_formula_ingredient = req.body.is_formula_ingredient === true || req.body.is_formula_ingredient === 'true'
+    const updatedType = req.body.type || (await db('supplies').where({ id: parseInt(req.params.id) }).first())?.type
+    updateData.is_formula_ingredient = ['Essence', 'Base', 'Chemical'].includes(updatedType) || req.body.is_formula_ingredient === true || req.body.is_formula_ingredient === 'true'
     updateData.updated_at = db.fn.now()
 
     await db('supplies').where({ id: parseInt(req.params.id) }).update(updateData)
