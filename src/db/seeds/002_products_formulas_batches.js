@@ -3,7 +3,8 @@
  */
 
 exports.seed = async function(knex) {
-  console.log('🧪 Verificando produtos, fórmulas e lotes de exemplo...')
+  console.log('⏭️  Seed de dados de exemplo desabilitado.')
+  return
 
   // Guard: não re-inserir se já existem dados
   const { count } = await knex('products').count('* as count').first()

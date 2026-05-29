@@ -4,6 +4,8 @@
  */
 
 exports.seed = async function(knex) {
+  console.log('⏭️  Seed de kits e cupons desabilitado.')
+  return
   // Verificar se já existem dados
   const existingKits = await knex('kits').count('* as count').first()
   const existingCoupons = await knex('coupons').count('* as count').first()

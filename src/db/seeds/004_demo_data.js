@@ -4,8 +4,10 @@
  */
 
 exports.seed = async function (knex) {
-  console.log('🌸 Iniciando seed de dados de demonstração...')
+  console.log('⏭️  Seed de demonstração desabilitado.')
+  return
 
+  // eslint-disable-next-line no-unreachable
   try {
     // ══════════════════════════════════════════════════════
     // FORNECEDORES
