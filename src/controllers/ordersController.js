@@ -360,8 +360,8 @@ exports.checkGifts = async (req, res) => {
 
 /**
  * Atualiza status do pedido.
- * Ao marcar Delivered: decrementa quantity_available dos envases vinculados.
- * Ao cancelar depois de Delivered: restaura o estoque dos envases.
+ * Ao confirmar: decrementa quantity_available dos envases vinculados.
+ * Ao cancelar depois de confirmado: restaura o estoque dos envases.
  */
 exports.updateStatus = async (req, res) => {
   try {
@@ -381,8 +381,8 @@ exports.updateStatus = async (req, res) => {
     if (notes    !== undefined) updateData.notes    = notes
 
     const [updated] = await db.transaction(async (trx) => {
-      // ── Entrega: debitar estoque dos envases vinculados ──────────────────
-      if (status === 'Delivered' && !order.stock_decremented) {
+      // ── Confirmação: debitar estoque dos envases vinculados ─────────────
+      if (status === 'Confirmed' && !order.stock_decremented) {
         const items = await trx('order_items').where({ order_id: id })
         for (const item of items) {
           if (!item.bottling_id) continue
@@ -394,7 +394,7 @@ exports.updateStatus = async (req, res) => {
         updateData.stock_decremented = true
       }
 
-      // ── Cancelamento após entrega: restaurar estoque dos envases ─────────
+      // ── Cancelamento após confirmação: restaurar estoque dos envases ─────
       if (status === 'Cancelled' && order.stock_decremented) {
         const items = await trx('order_items').where({ order_id: id })
         for (const item of items) {

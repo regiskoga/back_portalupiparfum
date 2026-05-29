@@ -331,18 +331,19 @@ async function getAlerts(req, res) {
 
     const alerts = []
 
-    // 1. Insumos com estoque abaixo do mínimo
+    // 1. Essências com estoque abaixo do mínimo
     const lowStockSupplies = await db('supplies')
-      .select('id', 'name', 'type', 'quantity_purchased', 'unit')
-      .where('quantity_purchased', '<', lowStockSupplyWarning)
-      .orderBy('quantity_purchased', 'asc')
+      .select('id', 'name', 'type', 'quantity_available', 'unit')
+      .where('type', 'Essence')
+      .where('quantity_available', '<', lowStockSupplyWarning)
+      .orderBy('quantity_available', 'asc')
 
     lowStockSupplies.forEach(supply => {
       alerts.push({
         type: 'low_stock',
-        severity: supply.quantity_purchased < lowStockSupplyCritical ? 'critical' : 'warning',
-        title: 'Estoque baixo de insumo',
-        message: `${supply.name} está com apenas ${supply.quantity_purchased}${supply.unit} em estoque`,
+        severity: supply.quantity_available < lowStockSupplyCritical ? 'critical' : 'warning',
+        title: 'Estoque baixo de essência',
+        message: `${supply.name} está com apenas ${supply.quantity_available}${supply.unit} disponível`,
         entity_type: 'supply',
         entity_id: supply.id,
         action_required: 'Realizar compra de insumo'
