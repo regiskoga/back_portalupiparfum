@@ -387,18 +387,18 @@ exports.seed = async function (knex) {
       const d = (delta) => { const dt = new Date(today); dt.setDate(dt.getDate() + delta); return dt }
 
       const orderDefs = [
-        { customer_id: customers[0]?.id,  code: 'ORD-20260410-001', status: 'Delivered',     channel: 'WhatsApp',       discount: 0,   shipping: 15.00, created_at: d(-40) },
-        { customer_id: customers[1]?.id,  code: 'ORD-20260415-002', status: 'Delivered',     channel: 'Instagram',      discount: 5,   shipping: 12.00, created_at: d(-35) },
-        { customer_id: customers[2]?.id,  code: 'ORD-20260420-003', status: 'Shipped',       channel: 'WhatsApp',       discount: 0,   shipping: 18.00, created_at: d(-30) },
-        { customer_id: customers[3]?.id,  code: 'ORD-20260425-004', status: 'Ready',         channel: 'Physical Store', discount: 10,  shipping:  0.00, created_at: d(-25) },
-        { customer_id: customers[4]?.id,  code: 'ORD-20260428-005', status: 'In Production', channel: 'Website',        discount: 0,   shipping: 20.00, created_at: d(-22) },
-        { customer_id: customers[5]?.id,  code: 'ORD-20260501-006', status: 'Confirmed',     channel: 'WhatsApp',       discount: 0,   shipping: 15.00, created_at: d(-18) },
-        { customer_id: customers[6]?.id,  code: 'ORD-20260505-007', status: 'Pending',       channel: 'Instagram',      discount: 0,   shipping: 15.00, created_at: d(-14) },
-        { customer_id: customers[7]?.id,  code: 'ORD-20260508-008', status: 'Confirmed',     channel: 'Referral',       discount: 15,  shipping:  0.00, created_at: d(-11) },
-        { customer_id: customers[8]?.id,  code: 'ORD-20260510-009', status: 'Cancelled',     channel: 'WhatsApp',       discount: 0,   shipping: 10.00, created_at: d(-9)  },
-        { customer_id: customers[9]?.id,  code: 'ORD-20260512-010', status: 'Pending',       channel: 'Website',        discount: 0,   shipping: 15.00, created_at: d(-7)  },
-        { customer_id: customers[10]?.id, code: 'ORD-20260515-011', status: 'Confirmed',     channel: 'WhatsApp',       discount: 5,   shipping: 12.00, created_at: d(-4)  },
-        { customer_id: customers[11]?.id, code: 'ORD-20260517-012', status: 'Pending',       channel: 'Physical Store', discount: 0,   shipping:  0.00, created_at: d(-2)  },
+        { customer_id: customers[0]?.id,  code: 'ORD-20260410-001', status: 'Delivered',     channel: 'WhatsApp',    discount: 0,   shipping: 15.00, created_at: d(-40) },
+        { customer_id: customers[1]?.id,  code: 'ORD-20260415-002', status: 'Delivered',     channel: 'Instagram',   discount: 5,   shipping: 12.00, created_at: d(-35) },
+        { customer_id: customers[2]?.id,  code: 'ORD-20260420-003', status: 'Shipped',       channel: 'WhatsApp',    discount: 0,   shipping: 18.00, created_at: d(-30) },
+        { customer_id: customers[3]?.id,  code: 'ORD-20260425-004', status: 'Ready',         channel: 'Loja física', discount: 10,  shipping:  0.00, created_at: d(-25) },
+        { customer_id: customers[4]?.id,  code: 'ORD-20260428-005', status: 'In Production', channel: 'Site',        discount: 0,   shipping: 20.00, created_at: d(-22) },
+        { customer_id: customers[5]?.id,  code: 'ORD-20260501-006', status: 'Confirmed',     channel: 'WhatsApp',    discount: 0,   shipping: 15.00, created_at: d(-18) },
+        { customer_id: customers[6]?.id,  code: 'ORD-20260505-007', status: 'Pending',       channel: 'Instagram',   discount: 0,   shipping: 15.00, created_at: d(-14) },
+        { customer_id: customers[7]?.id,  code: 'ORD-20260508-008', status: 'Confirmed',     channel: 'Indicação',   discount: 15,  shipping:  0.00, created_at: d(-11) },
+        { customer_id: customers[8]?.id,  code: 'ORD-20260510-009', status: 'Cancelled',     channel: 'WhatsApp',    discount: 0,   shipping: 10.00, created_at: d(-9)  },
+        { customer_id: customers[9]?.id,  code: 'ORD-20260512-010', status: 'Pending',       channel: 'Site',        discount: 0,   shipping: 15.00, created_at: d(-7)  },
+        { customer_id: customers[10]?.id, code: 'ORD-20260515-011', status: 'Confirmed',     channel: 'WhatsApp',    discount: 5,   shipping: 12.00, created_at: d(-4)  },
+        { customer_id: customers[11]?.id, code: 'ORD-20260517-012', status: 'Pending',       channel: 'Loja física', discount: 0,   shipping:  0.00, created_at: d(-2)  },
       ].filter(o => o.customer_id)
 
       if (orderDefs.length > 0) {
