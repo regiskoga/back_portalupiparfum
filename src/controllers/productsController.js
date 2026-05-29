@@ -168,11 +168,6 @@ async function remove(req, res) {
       return res.status(404).json({ error: 'Product not found' })
     }
 
-    const bottlingOrderCount = await db('bottling_orders').where({ product_id: id }).count('* as total').first()
-    if (parseInt(bottlingOrderCount.total) > 0) {
-      return res.status(409).json({ error: 'Produto não pode ser excluído pois está vinculado a ordens de envase.' })
-    }
-
     // formulas tem CASCADE mas batches tem RESTRICT em formulas — verifica indiretamente
     const batchViaFormulaCount = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
@@ -181,6 +176,12 @@ async function remove(req, res) {
     if (parseInt(batchViaFormulaCount.total) > 0) {
       return res.status(409).json({ error: 'Produto não pode ser excluído pois possui lotes de produção vinculados. Exclua os lotes primeiro.' })
     }
+
+    // Ordens automáticas geradas pelo motor de decisão — cascateia junto com o produto
+    await db('bottling_orders').where({ product_id: id }).del()
+    await db('production_orders')
+      .whereIn('formula_id', db('formulas').where({ product_id: id }).select('id'))
+      .del()
 
     await db('products').where('id', id).del()
     await ActivityLogger.logDelete('product', id, product.project_name, product)
