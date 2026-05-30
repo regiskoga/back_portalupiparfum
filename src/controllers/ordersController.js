@@ -569,6 +569,11 @@ exports.linkBottling = async (req, res) => {
     if (bottling_id != null) {
       const bottling = await db('bottlings').where({ id: parseInt(bottling_id) }).first()
       if (!bottling) return res.status(404).json({ error: 'Envase não encontrado' })
+      if (parseFloat(bottling.volume_ml) !== parseFloat(item.volume_ml)) {
+        return res.status(400).json({
+          error: `Volume incompatível: o item é de ${item.volume_ml}ml mas o envase é de ${bottling.volume_ml}ml`
+        })
+      }
       if (parseInt(bottling.quantity_available) < parseInt(item.quantity)) {
         return res.status(400).json({
           error: `Envase sem estoque suficiente: disponível ${bottling.quantity_available}, necessário ${item.quantity}`
