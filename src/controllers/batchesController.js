@@ -73,16 +73,19 @@ async function list(req, res) {
     const batchesWithMaceration = batches.map(batch => {
       if (batch.maceration_start && batch.maceration_end) {
         const today = new Date()
+        const startDate = new Date(batch.maceration_start)
         const endDate = new Date(batch.maceration_end)
         const daysRemaining = Math.ceil((endDate - today) / (1000 * 60 * 60 * 24))
-        
+        const totalMs = endDate - startDate
+        const elapsedMs = today - startDate
+
         batch.maceration_info = {
           days_remaining: Math.max(0, daysRemaining),
           is_ready: daysRemaining <= 0,
-          progress_percentage: Math.min(100, Math.max(0, ((10 - daysRemaining) / 10) * 100))
+          progress_percentage: Math.min(100, Math.max(0, (elapsedMs / totalMs) * 100))
         }
       }
-      
+
       return batch
     })
     
@@ -134,13 +137,16 @@ async function getOne(req, res) {
     // Calcular informações de maceração
     if (batch.maceration_start && batch.maceration_end) {
       const today = new Date()
+      const startDate = new Date(batch.maceration_start)
       const endDate = new Date(batch.maceration_end)
       const daysRemaining = Math.ceil((endDate - today) / (1000 * 60 * 60 * 24))
-      
+      const totalMs = endDate - startDate
+      const elapsedMs = today - startDate
+
       batch.maceration_info = {
         days_remaining: Math.max(0, daysRemaining),
         is_ready: daysRemaining <= 0,
-        progress_percentage: Math.min(100, Math.max(0, ((10 - daysRemaining) / 10) * 100))
+        progress_percentage: Math.min(100, Math.max(0, (elapsedMs / totalMs) * 100))
       }
     }
     
@@ -739,7 +745,7 @@ async function canBeBottled(req, res) {
           end_date: batch.maceration_end,
           days_remaining: daysRemaining,
           hours_remaining: hoursRemaining,
-          progress_percentage: Math.min(100, Math.max(0, ((10 - daysRemaining) / 10) * 100)),
+          progress_percentage: Math.min(100, Math.max(0, ((new Date() - new Date(batch.maceration_start)) / (new Date(batch.maceration_end) - new Date(batch.maceration_start))) * 100)),
           message: `Lote ainda em maceração. Faltam ${daysRemaining} dia(s) para liberação.`
         }
         

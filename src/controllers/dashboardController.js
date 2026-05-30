@@ -42,7 +42,7 @@ async function getOverview(req, res) {
       db('orders')
         .where('status', '!=', 'Cancelled')
         .select(
-          db.raw('COUNT(*) as total_orders'),
+          db.raw('COUNT(DISTINCT orders.id) as total_orders'),
           db.raw('SUM(oi.quantity * oi.unit_price) as total_revenue')
         )
         .leftJoin('order_items as oi', 'oi.order_id', 'orders.id')
@@ -172,10 +172,10 @@ async function getFinancialDashboard(req, res) {
     const salesRevenue = await orderQuery
       .where('status', '!=', 'Cancelled')
       .select(
-        db.raw('COUNT(*) as total_orders'),
+        db.raw('COUNT(DISTINCT orders.id) as total_orders'),
         db.raw('SUM(oi.quantity * oi.unit_price) as gross_revenue'),
-        db.raw('SUM(discount) as total_discounts'),
-        db.raw('SUM(shipping) as total_shipping')
+        db.raw('SUM(DISTINCT orders.discount) as total_discounts'),
+        db.raw('SUM(DISTINCT orders.shipping) as total_shipping')
       )
       .leftJoin('order_items as oi', 'oi.order_id', 'orders.id')
       .first()
@@ -474,13 +474,13 @@ async function getAlerts(req, res) {
         's.id',
         's.name',
         's.type',
-        's.quantity_purchased',
+        's.quantity_available',
         's.unit',
         db.raw('COUNT(DISTINCT fi.formula_id) as used_in_formulas'),
         db.raw('AVG(fi.percentage) as avg_usage_percentage')
       )
-      .where('s.quantity_purchased', '<', criticalSupplyQty)
-      .groupBy('s.id', 's.name', 's.type', 's.quantity_purchased', 's.unit')
+      .where('s.quantity_available', '<', criticalSupplyQty)
+      .groupBy('s.id', 's.name', 's.type', 's.quantity_available', 's.unit')
       .havingRaw(`COUNT(DISTINCT fi.formula_id) >= ${criticalSupplyFormulas}`)
 
     criticalSupplies.forEach(supply => {
@@ -488,7 +488,7 @@ async function getAlerts(req, res) {
         type: 'critical_supply',
         severity: 'critical',
         title: 'Insumo crítico com estoque baixo',
-        message: `${supply.name} é usado em ${supply.used_in_formulas} fórmulas e está com apenas ${supply.quantity_purchased}${supply.unit}`,
+        message: `${supply.name} é usado em ${supply.used_in_formulas} fórmulas e está com apenas ${supply.quantity_available}${supply.unit}`,
         entity_type: 'supply',
         entity_id: supply.id,
         action_required: 'Compra urgente necessária'

@@ -67,7 +67,10 @@ exports.list = async (req, res) => {
       .limit(limit)
       .offset(offset)
 
-    const [{ total }] = await db('orders').count('* as total')
+    let countQuery = db('orders')
+    if (status) countQuery = countQuery.where('orders.status', status)
+    if (customer_id) countQuery = countQuery.where('orders.customer_id', customer_id)
+    const [{ total }] = await countQuery.count('* as total')
 
     res.json({
       data: orders,
@@ -705,6 +708,8 @@ exports.applyCoupon = async (req, res) => {
     const [updated] = await db('orders').where({ id })
       .update({ coupon_id: coupon.id, coupon_discount: couponDiscount, updated_at: db.fn.now() })
       .returning('*')
+
+    await db('coupons').where({ id: coupon.id }).increment('current_uses', 1)
 
     res.json({ ...updated, coupon_code: coupon.code, coupon_type: coupon.type, coupon_discount: couponDiscount })
   } catch (error) {
