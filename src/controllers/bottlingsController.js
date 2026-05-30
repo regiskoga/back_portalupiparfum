@@ -394,10 +394,24 @@ async function remove(req, res) {
     if (!bottling) {
       return res.status(404).json({ error: 'Bottling not found' })
     }
-    
-    // Verificar se pode ser removido (implementar regras de negócio se necessário)
-    
+
+    // Bloquear se houver pedidos ATIVOS vinculados a este envase
+    const activeLinked = await db('order_items as oi')
+      .join('orders as o', 'o.id', 'oi.order_id')
+      .where('oi.bottling_id', parseInt(req.params.id))
+      .whereNotIn('o.status', ['Cancelled', 'Delivered'])
+      .select('o.code', 'o.status')
+
+    if (activeLinked.length > 0) {
+      const list = activeLinked.map(o => `${o.code} (${o.status})`).join(', ')
+      return res.status(409).json({
+        error: `Envase não pode ser excluído pois está vinculado ao(s) pedido(s) ativo(s): ${list}. Desvincule os itens antes de excluir.`
+      })
+    }
+
     await db.transaction(async (trx) => {
+      // Desvincula itens de pedidos já finalizados/cancelados para não deixar referências órfãs
+      await trx('order_items').where('bottling_id', parseInt(req.params.id)).update({ bottling_id: null })
       // Buscar lotes utilizados para reverter
       const batchesUsed = await trx('bottling_batches').where('bottling_id', parseInt(req.params.id))
       
