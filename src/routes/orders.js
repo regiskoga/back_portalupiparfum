@@ -133,4 +133,15 @@ router.patch(
   ordersController.linkBottling
 )
 
+/**
+ * PATCH /api/orders/:id/payment
+ * Registra ou atualiza informações de pagamento
+ */
+router.patch(
+  '/:id/payment',
+  [param('id').isInt()],
+  validate,
+  ordersController.registerPayment
+)
+
 module.exports = router

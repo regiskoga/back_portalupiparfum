@@ -603,6 +603,37 @@ exports.linkBottling = async (req, res) => {
 }
 
 /**
+ * Registra ou atualiza informações de pagamento do pedido
+ */
+exports.registerPayment = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { payment_method, amount_paid, payment_date } = req.body
+
+    const order = await db('orders').where({ id }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+
+    const [updated] = await db('orders')
+      .where({ id })
+      .update({
+        payment_method: payment_method || null,
+        amount_paid:    amount_paid != null ? parseFloat(amount_paid) : null,
+        payment_date:   payment_date || null,
+        updated_at:     db.fn.now(),
+      })
+      .returning('*')
+
+    await activityLogger.log('order_updated', 'order', id, {
+      description: `Pagamento registrado: ${payment_method} — ${amount_paid}`,
+    })
+
+    res.json(updated)
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+}
+
+/**
  * Aplica ou remove um cupom em pedido Pendente/Confirmado
  */
 exports.applyCoupon = async (req, res) => {
