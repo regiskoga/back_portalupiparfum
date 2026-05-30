@@ -11,19 +11,11 @@ async function list(req, res) {
       .select(
         'p.*',
         db.raw('COUNT(f.id) as formula_count'),
-        db.raw('COUNT(CASE WHEN f.validated = true THEN 1 END) as validated_formulas'),
-        db.raw(`(
-          SELECT COALESCE(SUM(oi.quantity), 0)
-          FROM order_items oi
-          JOIN orders o ON o.id = oi.order_id
-          WHERE oi.product_id = p.id
-          AND o.status IN ('Pending','Confirmed','In Production','Ready')
-        ) as committed_quantity`)
+        db.raw('COUNT(CASE WHEN f.validated = true THEN 1 END) as validated_formulas')
       )
       .groupBy('p.id')
       .orderBy('p.project_name', 'asc')
-    
-    // Filtros
+
     if (search) {
       query = query.where(function() {
         this.where('p.project_name', 'ilike', `%${search}%`)
@@ -32,16 +24,23 @@ async function list(req, res) {
           .orWhere('p.commercial_name', 'ilike', `%${search}%`)
       })
     }
-    
-    if (gender) {
-      query = query.where('p.gender', gender)
-    }
-    
-    if (active !== undefined) {
-      query = query.where('p.active', active === 'true')
-    }
-    
+    if (gender) query = query.where('p.gender', gender)
+    if (active !== undefined) query = query.where('p.active', active === 'true')
+
     const products = await query
+
+    if (products.length > 0) {
+      const productIds = products.map(p => p.id)
+      const committed = await db('order_items as oi')
+        .join('orders as o', 'o.id', 'oi.order_id')
+        .whereIn('oi.product_id', productIds)
+        .whereIn('o.status', ['Pending', 'Confirmed', 'In Production', 'Ready'])
+        .groupBy('oi.product_id')
+        .select('oi.product_id', db.raw('COALESCE(SUM(oi.quantity), 0) as committed_quantity'))
+      const committedMap = Object.fromEntries(committed.map(r => [r.product_id, r.committed_quantity]))
+      products.forEach(p => { p.committed_quantity = committedMap[p.id] || 0 })
+    }
+
     res.json(products)
   } catch (error) {
     res.status(500).json({ error: error.message })

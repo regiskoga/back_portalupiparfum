@@ -223,23 +223,29 @@ async function create(req, res) {
       .select('fi.supply_id', 'fi.percentage', 's.unit_cost')
       .where('fi.formula_id', parseInt(formula_id))
 
-    // Validar e calcular custo das essências
+    // Validar e calcular custo das essências (batch lookup)
     let essenceCost = 0
-    for (const e of essences) {
-      const supply = await db('supplies').where('id', parseInt(e.supply_id)).first()
-      if (!supply) return res.status(400).json({ error: `Essência ID ${e.supply_id} não encontrada` })
-      // Gap #1: impede uso de essência fechada em novo lote
-      if (!supply.is_open) return res.status(400).json({ error: `Essência "${supply.name}" está fechada e não pode ser usada em novos lotes` })
+    if (essences.length > 0) {
+      const essenceIds = essences.map(e => parseInt(e.supply_id))
+      const suppliesMap = await db('supplies')
+        .whereIn('id', essenceIds)
+        .select('id', 'name', 'unit', 'unit_cost', 'quantity_available', 'is_open')
+        .then(rows => Object.fromEntries(rows.map(r => [r.id, r])))
 
-      const qtdUsada = parseFloat(e.quantity || 0)
-      const qtdDisponivel = parseFloat(supply.quantity_available || 0)
-      if (qtdUsada > qtdDisponivel) {
-        return res.status(400).json({
-          error: `Estoque insuficiente para "${supply.name}": disponível ${qtdDisponivel}${supply.unit}, solicitado ${qtdUsada}${supply.unit}`
-        })
+      for (const e of essences) {
+        const supply = suppliesMap[parseInt(e.supply_id)]
+        if (!supply) return res.status(400).json({ error: `Essência ID ${e.supply_id} não encontrada` })
+        if (!supply.is_open) return res.status(400).json({ error: `Essência "${supply.name}" está fechada e não pode ser usada em novos lotes` })
+
+        const qtdUsada = parseFloat(e.quantity || 0)
+        const qtdDisponivel = parseFloat(supply.quantity_available || 0)
+        if (qtdUsada > qtdDisponivel) {
+          return res.status(400).json({
+            error: `Estoque insuficiente para "${supply.name}": disponível ${qtdDisponivel}${supply.unit}, solicitado ${qtdUsada}${supply.unit}`
+          })
+        }
+        essenceCost += parseFloat(supply.unit_cost || 0) * qtdUsada
       }
-
-      essenceCost += parseFloat(supply.unit_cost || 0) * qtdUsada
     }
 
     // Custo dos demais insumos

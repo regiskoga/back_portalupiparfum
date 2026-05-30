@@ -63,26 +63,28 @@ async function list(req, res) {
     }
     
     const bottlings = await query
-    
-    // Adicionar informações dos lotes para cada envase
-    for (let bottling of bottlings) {
-      const batches = await db('bottling_batches as bb')
+
+    if (bottlings.length > 0) {
+      const bottlingIds = bottlings.map(b => b.id)
+      const allBatches = await db('bottling_batches as bb')
         .join('batches as b', 'b.id', 'bb.batch_id')
         .join('formulas as f', 'f.id', 'b.formula_id')
         .leftJoin('products as p', 'p.id', 'b.product_id')
-        .select(
-          'bb.*',
-          'b.batch_code',
-          'b.cost_per_ml',
-          'f.name as formula_name',
-          'p.project_name'
-        )
-        .where('bb.bottling_id', bottling.id)
+        .select('bb.*', 'b.batch_code', 'b.cost_per_ml', 'f.name as formula_name', 'p.project_name')
+        .whereIn('bb.bottling_id', bottlingIds)
 
-      bottling.batches = batches
-      bottling.total_ml_used = batches.reduce((sum, b) => sum + parseFloat(b.ml_used), 0)
+      const batchesByBottling = {}
+      for (const batch of allBatches) {
+        if (!batchesByBottling[batch.bottling_id]) batchesByBottling[batch.bottling_id] = []
+        batchesByBottling[batch.bottling_id].push(batch)
+      }
+      for (const bottling of bottlings) {
+        const batches = batchesByBottling[bottling.id] || []
+        bottling.batches = batches
+        bottling.total_ml_used = batches.reduce((sum, b) => sum + parseFloat(b.ml_used), 0)
+      }
     }
-    
+
     res.json(bottlings)
   } catch (error) {
     res.status(500).json({ error: error.message })

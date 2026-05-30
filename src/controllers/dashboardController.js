@@ -3,97 +3,103 @@ const { db } = require('../models/db')
 // ─── DASHBOARD OVERVIEW ───────────────────────────────────────────────────────
 async function getOverview(req, res) {
   try {
-    // Estatísticas de Produção
-    const productionStats = await db('batches')
-      .select(
-        db.raw('COUNT(*) as total_batches'),
-        db.raw('SUM(quantity_ml) as total_ml_produced'),
-        db.raw('SUM(remaining_ml) as total_ml_remaining'),
-        db.raw('SUM(total_cost) as total_production_cost')
-      )
-      .first()
-
-    // Estatísticas de Envase
-    const bottlingStats = await db('bottlings')
-      .select(
-        db.raw('COUNT(*) as total_bottlings'),
-        db.raw('SUM(quantity) as total_units_produced'),
-        db.raw('SUM(total_cost) as total_bottling_cost')
-      )
-      .first()
-
-    // Estatísticas de Vendas
-    const salesStats = await db('orders')
-      .where('status', '!=', 'Cancelled')
-      .select(
-        db.raw('COUNT(*) as total_orders'),
-        db.raw('SUM(oi.quantity * oi.unit_price) as total_revenue')
-      )
-      .leftJoin('order_items as oi', 'oi.order_id', 'orders.id')
-      .first()
-
-    // Status dos Lotes
-    const batchesByStatus = await db('batches')
-      .select('status')
-      .count('* as count')
-      .sum('remaining_ml as remaining_ml')
-      .groupBy('status')
-
-    // Lotes prontos para envase
-    const readyForBottling = await db('batches')
-      .where('status', 'Pronto para envase')
-      .where('remaining_ml', '>', 0)
-      .count('* as count')
-      .first()
-
-    // Lotes em maceração
-    const inMaceration = await db('batches')
-      .where('status', 'Em maceração')
-      .where('maceration_end', '>', db.fn.now())
-      .count('* as count')
-      .first()
-
-    // Produtos mais produzidos
-    const topProducts = await db('products as p')
-      .leftJoin('formulas as f', 'f.product_id', 'p.id')
-      .leftJoin('batches as b', 'b.formula_id', 'f.id')
-      .select(
-        'p.id',
-        'p.project_name',
-        'p.commercial_name',
-        db.raw('COUNT(b.id) as batch_count'),
-        db.raw('SUM(b.quantity_ml) as total_ml_produced')
-      )
-      .groupBy('p.id', 'p.project_name', 'p.commercial_name')
-      .orderBy('total_ml_produced', 'desc')
-      .limit(5)
-
-    // Insumos com estoque baixo
+    // Busca limiar de estoque baixo primeiro (query leve, necessária para a próxima)
     const overviewParams = await db('parameters')
       .whereIn('key', ['low_stock_supply_warning'])
       .select('key', 'value')
     const overviewParamsMap = Object.fromEntries(overviewParams.map(r => [r.key, parseFloat(r.value)]))
     const overviewLowStockWarning = overviewParamsMap.low_stock_supply_warning ?? 100
 
-    const lowStockSupplies = await db('supplies')
-      .select('id', 'name', 'type', 'quantity_purchased', 'unit')
-      .where('quantity_purchased', '<', overviewLowStockWarning)
-      .orderBy('quantity_purchased', 'asc')
-      .limit(10)
+    // Todas as demais queries em paralelo
+    const [
+      productionStats,
+      bottlingStats,
+      salesStats,
+      batchesByStatus,
+      readyForBottling,
+      inMaceration,
+      topProducts,
+      lowStockSupplies,
+      topCustomers,
+    ] = await Promise.all([
+      db('batches')
+        .select(
+          db.raw('COUNT(*) as total_batches'),
+          db.raw('SUM(quantity_ml) as total_ml_produced'),
+          db.raw('SUM(remaining_ml) as total_ml_remaining'),
+          db.raw('SUM(total_cost) as total_production_cost')
+        )
+        .first(),
 
-    // Clientes mais ativos
-    const topCustomers = await db('customers as c')
-      .leftJoin('orders as o', 'o.customer_id', 'c.id')
-      .select(
-        'c.id',
-        'c.name',
-        db.raw('COUNT(o.id) as order_count'),
-        db.raw('SUM(oi.quantity * oi.unit_price) as total_spent')
-      )
-      .leftJoin('order_items as oi', 'oi.order_id', 'o.id')
-      .groupBy('c.id', 'c.name')
-      .orderBy('total_spent', 'desc')
-      .limit(5)
+      db('bottlings')
+        .select(
+          db.raw('COUNT(*) as total_bottlings'),
+          db.raw('SUM(quantity) as total_units_produced'),
+          db.raw('SUM(total_cost) as total_bottling_cost')
+        )
+        .first(),
+
+      db('orders')
+        .where('status', '!=', 'Cancelled')
+        .select(
+          db.raw('COUNT(*) as total_orders'),
+          db.raw('SUM(oi.quantity * oi.unit_price) as total_revenue')
+        )
+        .leftJoin('order_items as oi', 'oi.order_id', 'orders.id')
+        .first(),
+
+      db('batches')
+        .select('status')
+        .count('* as count')
+        .sum('remaining_ml as remaining_ml')
+        .groupBy('status'),
+
+      db('batches')
+        .where('status', 'Pronto para envase')
+        .where('remaining_ml', '>', 0)
+        .count('* as count')
+        .first(),
+
+      db('batches')
+        .where('status', 'Em maceração')
+        .where('maceration_end', '>', db.fn.now())
+        .count('* as count')
+        .first(),
+
+      db('products as p')
+        .leftJoin('formulas as f', 'f.product_id', 'p.id')
+        .leftJoin('batches as b', 'b.formula_id', 'f.id')
+        .select(
+          'p.id',
+          'p.project_name',
+          'p.commercial_name',
+          db.raw('COUNT(b.id) as batch_count'),
+          db.raw('SUM(b.quantity_ml) as total_ml_produced')
+        )
+        .groupBy('p.id', 'p.project_name', 'p.commercial_name')
+        .orderBy('total_ml_produced', 'desc')
+        .limit(5),
+
+      db('supplies')
+        .select('id', 'name', 'type', 'quantity_available', 'unit')
+        .where('type', 'Essence')
+        .where('quantity_available', '<', overviewLowStockWarning)
+        .orderBy('quantity_available', 'asc')
+        .limit(10),
+
+      db('customers as c')
+        .leftJoin('orders as o', 'o.customer_id', 'c.id')
+        .select(
+          'c.id',
+          'c.name',
+          db.raw('COUNT(o.id) as order_count'),
+          db.raw('SUM(oi.quantity * oi.unit_price) as total_spent')
+        )
+        .leftJoin('order_items as oi', 'oi.order_id', 'o.id')
+        .groupBy('c.id', 'c.name')
+        .orderBy('total_spent', 'desc')
+        .limit(5),
+    ])
 
     res.json({
       production: {
@@ -363,28 +369,30 @@ async function getAlerts(req, res) {
       .groupBy('oi.product_name')
       .having(db.raw('COUNT(*)'), '>=', highDemandOrdersMin)
 
-    for (const product of highDemandProducts) {
-      // Verificar estoque disponível (lotes prontos para envase)
-      const availableStock = await db('batches as b')
+    if (highDemandProducts.length > 0) {
+      const productNames = highDemandProducts.map(p => p.product_name)
+      const stockRows = await db('batches as b')
         .join('formulas as f', 'f.id', 'b.formula_id')
         .join('products as p', 'p.id', 'f.product_id')
-        .where('p.commercial_name', product.product_name)
+        .whereIn('p.commercial_name', productNames)
         .where('b.status', 'Pronto para envase')
-        .sum('b.remaining_ml as total_ml')
-        .first()
+        .select('p.commercial_name', db.raw('COALESCE(SUM(b.remaining_ml), 0) as total_ml'))
+        .groupBy('p.commercial_name')
+      const stockByName = Object.fromEntries(stockRows.map(r => [r.commercial_name, parseFloat(r.total_ml)]))
 
-      const totalMl = availableStock?.total_ml || 0
-
-      if (totalMl < lowStockBatchMl) {
-        alerts.push({
-          type: 'high_demand_low_stock',
-          severity: totalMl === 0 ? 'critical' : 'warning',
-          title: 'Produto com alta demanda e estoque baixo',
-          message: `${product.product_name} teve ${product.order_count} pedidos nos últimos 30 dias, mas tem apenas ${totalMl}ml disponível`,
-          entity_type: 'product',
-          entity_name: product.product_name,
-          action_required: 'Produzir novo lote'
-        })
+      for (const product of highDemandProducts) {
+        const totalMl = stockByName[product.product_name] || 0
+        if (totalMl < lowStockBatchMl) {
+          alerts.push({
+            type: 'high_demand_low_stock',
+            severity: totalMl === 0 ? 'critical' : 'warning',
+            title: 'Produto com alta demanda e estoque baixo',
+            message: `${product.product_name} teve ${product.order_count} pedidos nos últimos 30 dias, mas tem apenas ${totalMl}ml disponível`,
+            entity_type: 'product',
+            entity_name: product.product_name,
+            action_required: 'Produzir novo lote'
+          })
+        }
       }
     }
 

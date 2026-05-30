@@ -438,34 +438,25 @@ exports.getAutomaticOrders = async (req, res) => {
   try {
     const { id } = req.params
 
-    const productionOrders = await db('production_orders')
-      .leftJoin('formulas', 'production_orders.formula_id', 'formulas.id')
-      .leftJoin('products', 'formulas.product_id', 'products.id')
-      .where('production_orders.order_id', id)
-      .select(
-        'production_orders.*',
-        'products.name as product_name'
-      )
+    const [productionOrders, bottlingOrders, purchaseOrders] = await Promise.all([
+      db('production_orders')
+        .leftJoin('formulas', 'production_orders.formula_id', 'formulas.id')
+        .leftJoin('products', 'formulas.product_id', 'products.id')
+        .where('production_orders.order_id', id)
+        .select('production_orders.*', 'products.name as product_name'),
 
-    const bottlingOrders = await db('bottling_orders')
-      .leftJoin('products', 'bottling_orders.product_id', 'products.id')
-      .leftJoin('batches', 'bottling_orders.batch_id', 'batches.id')
-      .where('bottling_orders.order_id', id)
-      .select(
-        'bottling_orders.*',
-        'products.name as product_name',
-        'batches.code as batch_code'
-      )
+      db('bottling_orders')
+        .leftJoin('products', 'bottling_orders.product_id', 'products.id')
+        .leftJoin('batches', 'bottling_orders.batch_id', 'batches.id')
+        .where('bottling_orders.order_id', id)
+        .select('bottling_orders.*', 'products.name as product_name', 'batches.code as batch_code'),
 
-    const purchaseOrders = await db('purchase_orders')
-      .leftJoin('supplies', 'purchase_orders.supply_id', 'supplies.id')
-      .leftJoin('suppliers', 'purchase_orders.supplier_id', 'suppliers.id')
-      .where('purchase_orders.order_id', id)
-      .select(
-        'purchase_orders.*',
-        'supplies.name as supply_name',
-        'suppliers.name as supplier_name'
-      )
+      db('purchase_orders')
+        .leftJoin('supplies', 'purchase_orders.supply_id', 'supplies.id')
+        .leftJoin('suppliers', 'purchase_orders.supplier_id', 'suppliers.id')
+        .where('purchase_orders.order_id', id)
+        .select('purchase_orders.*', 'supplies.name as supply_name', 'suppliers.name as supplier_name'),
+    ])
 
     res.json({
       production_orders: productionOrders,

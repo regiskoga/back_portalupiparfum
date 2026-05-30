@@ -94,11 +94,15 @@ async function create(req, res) {
       }
     }
 
-    // Gap #5: validar supply_ids antes de inserir
-    for (const item of items) {
-      const supply = await db('supplies').where('id', parseInt(item.supply_id)).first()
-      if (!supply) {
-        return res.status(400).json({ error: `Insumo ID ${item.supply_id} não encontrado` })
+    // Gap #5: validar supply_ids antes de inserir (batch lookup)
+    if (items.length > 0) {
+      const supplyIds = items.map(i => parseInt(i.supply_id))
+      const found = await db('supplies').whereIn('id', supplyIds).select('id')
+      const foundSet = new Set(found.map(s => s.id))
+      for (const item of items) {
+        if (!foundSet.has(parseInt(item.supply_id))) {
+          return res.status(400).json({ error: `Insumo ID ${item.supply_id} não encontrado` })
+        }
       }
     }
 
