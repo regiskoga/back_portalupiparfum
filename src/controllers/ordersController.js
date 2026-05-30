@@ -376,6 +376,17 @@ exports.updateStatus = async (req, res) => {
     const order = await db('orders').where({ id }).first()
     if (!order) return res.status(404).json({ error: 'Order not found' })
 
+    // ── Trava: só pode marcar Pronto se todos os itens com produto estão vinculados ──
+    if (status === 'Ready') {
+      const items = await db('order_items').where({ order_id: id }).whereNotNull('product_id')
+      const unlinked = items.filter(i => !i.bottling_id)
+      if (unlinked.length > 0) {
+        return res.status(400).json({
+          error: `Não é possível marcar como Pronto: ${unlinked.length} item(ns) sem envase vinculado.`
+        })
+      }
+    }
+
     const updateData = { status, updated_at: db.fn.now() }
     if (discount !== undefined) updateData.discount = parseFloat(discount) || 0
     if (notes    !== undefined) updateData.notes    = notes
@@ -394,8 +405,8 @@ exports.updateStatus = async (req, res) => {
         updateData.stock_decremented = true
       }
 
-      // ── Cancelamento após confirmação: restaurar estoque dos envases ─────
-      if (status === 'Cancelled' && order.stock_decremented) {
+      // ── Cancelamento ou regressão para Pendente: restaurar estoque ──────
+      if ((status === 'Cancelled' || status === 'Pending') && order.stock_decremented) {
         const items = await trx('order_items').where({ order_id: id })
         for (const item of items) {
           if (!item.bottling_id) continue
@@ -567,11 +578,20 @@ exports.linkBottling = async (req, res) => {
     if (bottling_id != null) {
       const bottling = await db('bottlings').where({ id: parseInt(bottling_id) }).first()
       if (!bottling) return res.status(404).json({ error: 'Envase não encontrado' })
-      // Gap #3: verificar estoque suficiente no envase
       if (parseInt(bottling.quantity_available) < parseInt(item.quantity)) {
         return res.status(400).json({
           error: `Envase sem estoque suficiente: disponível ${bottling.quantity_available}, necessário ${item.quantity}`
         })
+      }
+    }
+
+    // Quando o pedido já foi confirmado, linkBottling gerencia quantity_available diretamente
+    if (order.stock_decremented) {
+      if (item.bottling_id) {
+        await db('bottlings').where({ id: item.bottling_id }).increment('quantity_available', parseInt(item.quantity))
+      }
+      if (bottling_id != null) {
+        await db('bottlings').where({ id: parseInt(bottling_id) }).decrement('quantity_available', parseInt(item.quantity))
       }
     }
 
