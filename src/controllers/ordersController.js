@@ -132,7 +132,7 @@ exports.getById = async (req, res) => {
           .whereIn('oib.order_item_id', itemIds)
           .select(
             'oib.id', 'oib.order_item_id', 'oib.bottling_id', 'oib.quantity',
-            'b.batch_code', 'b.volume_ml', 'b.product_name', 'b.quantity_available'
+            'b.bottling_code', 'b.volume_ml', 'b.product_name', 'b.quantity_available'
           )
       : []
 
