@@ -124,7 +124,28 @@ exports.getById = async (req, res) => {
         'products.inspiration_name'
       )
 
-    order.items = items
+    // Carregar vínculos de envase por item (junction table)
+    const itemIds = items.map(i => i.id)
+    const bottlingLinks = itemIds.length > 0
+      ? await db('order_item_bottlings as oib')
+          .join('bottlings as b', 'b.id', 'oib.bottling_id')
+          .whereIn('oib.order_item_id', itemIds)
+          .select(
+            'oib.id', 'oib.order_item_id', 'oib.bottling_id', 'oib.quantity',
+            'b.batch_code', 'b.volume_ml', 'b.product_name', 'b.quantity_available'
+          )
+      : []
+
+    const linksByItem = {}
+    for (const l of bottlingLinks) {
+      if (!linksByItem[l.order_item_id]) linksByItem[l.order_item_id] = []
+      linksByItem[l.order_item_id].push(l)
+    }
+    order.items = items.map(i => ({
+      ...i,
+      bottling_links: linksByItem[i.id] || [],
+      linked_quantity: (linksByItem[i.id] || []).reduce((s, l) => s + parseInt(l.quantity), 0),
+    }))
 
     res.json(order)
   } catch (error) {
@@ -379,13 +400,20 @@ exports.updateStatus = async (req, res) => {
     const order = await db('orders').where({ id }).first()
     if (!order) return res.status(404).json({ error: 'Order not found' })
 
-    // ── Trava: só pode marcar Pronto se todos os itens com produto estão vinculados ──
+    // ── Trava: só pode marcar Pronto se todos os itens têm envases suficientes ──
     if (status === 'Ready') {
       const items = await db('order_items').where({ order_id: id }).whereNotNull('product_id')
-      const unlinked = items.filter(i => !i.bottling_id)
-      if (unlinked.length > 0) {
+      const itemIds = items.map(i => i.id)
+      const links = itemIds.length > 0
+        ? await db('order_item_bottlings').whereIn('order_item_id', itemIds)
+            .groupBy('order_item_id')
+            .select('order_item_id', db.raw('SUM(quantity) as total_linked'))
+        : []
+      const linkedMap = Object.fromEntries(links.map(l => [l.order_item_id, parseInt(l.total_linked)]))
+      const incomplete = items.filter(i => (linkedMap[i.id] || 0) < parseInt(i.quantity))
+      if (incomplete.length > 0) {
         return res.status(400).json({
-          error: `Não é possível marcar como Pronto: ${unlinked.length} item(ns) sem envase vinculado.`
+          error: `Não é possível marcar como Pronto: ${incomplete.length} item(ns) sem envase(s) suficiente(s) vinculado(s).`
         })
       }
     }
@@ -395,27 +423,25 @@ exports.updateStatus = async (req, res) => {
     if (notes    !== undefined) updateData.notes    = notes
 
     const [updated] = await db.transaction(async (trx) => {
-      // ── Confirmação: debitar estoque dos envases vinculados ─────────────
+      // ── Confirmação: debitar via junction table ──────────────────────────
       if (status === 'Confirmed' && !order.stock_decremented) {
-        const items = await trx('order_items').where({ order_id: id })
-        for (const item of items) {
-          if (!item.bottling_id) continue
+        const itemIds = (await trx('order_items').where({ order_id: id }).select('id')).map(i => i.id)
+        const links = itemIds.length > 0 ? await trx('order_item_bottlings').whereIn('order_item_id', itemIds) : []
+        for (const link of links) {
           await trx.raw(
             'UPDATE bottlings SET quantity_available = GREATEST(0, quantity_available - ?) WHERE id = ?',
-            [parseInt(item.quantity), item.bottling_id]
+            [parseInt(link.quantity), link.bottling_id]
           )
         }
         updateData.stock_decremented = true
       }
 
-      // ── Cancelamento ou regressão para Pendente: restaurar estoque ──────
+      // ── Cancelamento ou regressão para Pendente: restaurar via junction ──
       if ((status === 'Cancelled' || status === 'Pending') && order.stock_decremented) {
-        const items = await trx('order_items').where({ order_id: id })
-        for (const item of items) {
-          if (!item.bottling_id) continue
-          await trx('bottlings')
-            .where({ id: item.bottling_id })
-            .increment('quantity_available', parseInt(item.quantity))
+        const itemIds = (await trx('order_items').where({ order_id: id }).select('id')).map(i => i.id)
+        const links = itemIds.length > 0 ? await trx('order_item_bottlings').whereIn('order_item_id', itemIds) : []
+        for (const link of links) {
+          await trx('bottlings').where({ id: link.bottling_id }).increment('quantity_available', parseInt(link.quantity))
         }
         updateData.stock_decremented = false
       }
@@ -600,6 +626,103 @@ exports.linkBottling = async (req, res) => {
       .returning('*')
 
     res.json(updated)
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+}
+
+/**
+ * Adiciona um vínculo de envase a um item via junction table (N:N).
+ * Auto-calcula a quantidade: min(restante do item, disponível no envase).
+ */
+exports.addBottling = async (req, res) => {
+  try {
+    const { orderId, itemId } = req.params
+    const { bottling_id } = req.body
+
+    const order = await db('orders').where({ id: parseInt(orderId) }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+    if (!['Confirmed', 'In Production', 'Ready'].includes(order.status)) {
+      return res.status(400).json({ error: 'Vínculo de envase só é permitido em pedidos Confirmados, Em Produção ou Prontos' })
+    }
+
+    const item = await db('order_items').where({ id: parseInt(itemId), order_id: parseInt(orderId) }).first()
+    if (!item) return res.status(404).json({ error: 'Item not found' })
+
+    const bottling = await db('bottlings').where({ id: parseInt(bottling_id) }).first()
+    if (!bottling) return res.status(404).json({ error: 'Envase não encontrado' })
+
+    if (parseFloat(bottling.volume_ml) !== parseFloat(item.volume_ml)) {
+      return res.status(400).json({
+        error: `Volume incompatível: item é ${item.volume_ml}ml mas envase é ${bottling.volume_ml}ml`
+      })
+    }
+
+    const existing = await db('order_item_bottlings')
+      .where({ order_item_id: parseInt(itemId), bottling_id: parseInt(bottling_id) })
+      .first()
+    if (existing) return res.status(400).json({ error: 'Este envase já está vinculado a este item' })
+
+    const existingLinks = await db('order_item_bottlings').where({ order_item_id: parseInt(itemId) })
+    const alreadyLinked = existingLinks.reduce((s, l) => s + parseInt(l.quantity), 0)
+    const remaining = parseInt(item.quantity) - alreadyLinked
+
+    if (remaining <= 0) return res.status(400).json({ error: 'Item já está completamente vinculado' })
+    if (parseInt(bottling.quantity_available) <= 0) {
+      return res.status(400).json({ error: 'Envase sem estoque disponível' })
+    }
+
+    const quantityToLink = Math.min(remaining, parseInt(bottling.quantity_available))
+
+    await db.transaction(async trx => {
+      await trx('order_item_bottlings').insert({
+        order_item_id: parseInt(itemId),
+        bottling_id:   parseInt(bottling_id),
+        quantity:      quantityToLink,
+      })
+      if (order.stock_decremented) {
+        await trx.raw(
+          'UPDATE bottlings SET quantity_available = GREATEST(0, quantity_available - ?) WHERE id = ?',
+          [quantityToLink, parseInt(bottling_id)]
+        )
+      }
+    })
+
+    res.json({ linked: quantityToLink, bottling_id: parseInt(bottling_id) })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+}
+
+/**
+ * Remove um vínculo de envase de um item de pedido.
+ * Restaura o estoque se o pedido já teve estoque debitado.
+ */
+exports.removeBottling = async (req, res) => {
+  try {
+    const { orderId, itemId, linkId } = req.params
+
+    const order = await db('orders').where({ id: parseInt(orderId) }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+    if (!['Confirmed', 'In Production', 'Ready'].includes(order.status)) {
+      return res.status(400).json({ error: 'Operação não permitida neste status' })
+    }
+
+    const link = await db('order_item_bottlings')
+      .where({ id: parseInt(linkId), order_item_id: parseInt(itemId) })
+      .first()
+    if (!link) return res.status(404).json({ error: 'Vínculo não encontrado' })
+
+    await db.transaction(async trx => {
+      if (order.stock_decremented) {
+        await trx('bottlings')
+          .where({ id: link.bottling_id })
+          .increment('quantity_available', parseInt(link.quantity))
+      }
+      await trx('order_item_bottlings').where({ id: parseInt(linkId) }).del()
+    })
+
+    res.json({ removed: true })
   } catch (error) {
     res.status(500).json({ error: error.message })
   }

@@ -134,6 +134,36 @@ router.patch(
 )
 
 /**
+ * POST /api/orders/:orderId/items/:itemId/bottlings
+ * Adiciona vínculo de envase a um item (junction table N:N)
+ */
+router.post(
+  '/:orderId/items/:itemId/bottlings',
+  [
+    param('orderId').isInt(),
+    param('itemId').isInt(),
+    body('bottling_id').isInt({ min: 1 }).withMessage('bottling_id must be a positive integer'),
+  ],
+  validate,
+  ordersController.addBottling
+)
+
+/**
+ * DELETE /api/orders/:orderId/items/:itemId/bottlings/:linkId
+ * Remove vínculo de envase de um item
+ */
+router.delete(
+  '/:orderId/items/:itemId/bottlings/:linkId',
+  [
+    param('orderId').isInt(),
+    param('itemId').isInt(),
+    param('linkId').isInt(),
+  ],
+  validate,
+  ordersController.removeBottling
+)
+
+/**
  * PATCH /api/orders/:id/payment
  * Registra ou atualiza informações de pagamento
  */
