@@ -232,25 +232,31 @@ async function create(req, res) {
     // Validar e calcular custo das essências (batch lookup)
     let essenceCost = 0
     if (essences.length > 0) {
-      const essenceIds = essences.map(e => parseInt(e.supply_id))
+      const essenceIds = [...new Set(essences.map(e => parseInt(e.supply_id)))]
       const suppliesMap = await db('supplies')
         .whereIn('id', essenceIds)
         .select('id', 'name', 'unit', 'unit_cost', 'quantity_available', 'is_open')
         .then(rows => Object.fromEntries(rows.map(r => [r.id, r])))
 
+      // Agrupa total por supply_id — mesma essência duas vezes soma antes de validar
+      const neededBySupply = {}
       for (const e of essences) {
-        const supply = suppliesMap[parseInt(e.supply_id)]
-        if (!supply) return res.status(400).json({ error: `Essência ID ${e.supply_id} não encontrada` })
+        const id = parseInt(e.supply_id)
+        neededBySupply[id] = (neededBySupply[id] || 0) + parseFloat(e.quantity || 0)
+      }
+
+      for (const [supplyIdStr, qtdTotal] of Object.entries(neededBySupply)) {
+        const supply = suppliesMap[parseInt(supplyIdStr)]
+        if (!supply) return res.status(400).json({ error: `Essência ID ${supplyIdStr} não encontrada` })
         if (!supply.is_open) return res.status(400).json({ error: `Essência "${supply.name}" está fechada e não pode ser usada em novos lotes` })
 
-        const qtdUsada = parseFloat(e.quantity || 0)
         const qtdDisponivel = parseFloat(supply.quantity_available || 0)
-        if (qtdUsada > qtdDisponivel) {
+        if (qtdTotal > qtdDisponivel) {
           return res.status(400).json({
-            error: `Estoque insuficiente para "${supply.name}": disponível ${qtdDisponivel}${supply.unit}, solicitado ${qtdUsada}${supply.unit}`
+            error: `Estoque insuficiente para "${supply.name}": disponível ${qtdDisponivel}${supply.unit}, solicitado ${qtdTotal}${supply.unit}`
           })
         }
-        essenceCost += parseFloat(supply.unit_cost || 0) * qtdUsada
+        essenceCost += parseFloat(supply.unit_cost || 0) * qtdTotal
       }
     }
 
