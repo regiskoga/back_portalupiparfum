@@ -432,7 +432,19 @@ async function remove(req, res) {
       return res.status(409).json({ error: 'Lote não pode ser excluído pois está vinculado a ordens de envase.' })
     }
 
-    await db('batches').where('id', id).del()
+    // Restaurar estoque das essências usadas neste lote
+    const batchEssences = await db('batch_essences').where({ batch_id: id }).select('supply_id', 'quantity')
+
+    await db.transaction(async trx => {
+      for (const be of batchEssences) {
+        await trx.raw(
+          'UPDATE supplies SET quantity_available = quantity_available + ?, is_open = true WHERE id = ?',
+          [parseFloat(be.quantity), parseInt(be.supply_id)]
+        )
+      }
+      await trx('batches').where('id', id).del()
+    })
+
     res.json({ message: 'Batch deleted successfully' })
   } catch (error) {
     res.status(500).json({ error: error.message })
