@@ -22,7 +22,11 @@ async function list (req, res) {
     if (supplier_id) query = query.where('s.supplier_id', Number(supplier_id))
     if (busca) query = query.where('s.name', 'like', `%${busca}%`)
     if (req.query.receipt_status) query = query.where('s.receipt_status', req.query.receipt_status)
-    if (req.query.is_open !== undefined) query = query.where('s.is_open', req.query.is_open === 'true')
+    if (req.query.is_open !== undefined) {
+      const isOpen = req.query.is_open === 'true'
+      query = query.where('s.is_open', isOpen)
+      if (isOpen) query = query.where('s.quantity_available', '>', 0)
+    }
     if (req.query.is_formula_ingredient !== undefined) query = query.where('s.is_formula_ingredient', req.query.is_formula_ingredient === 'true')
 
     // Count total
