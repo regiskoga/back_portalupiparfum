@@ -328,21 +328,15 @@ async function create(req, res) {
         }))
         await trx('batch_essences').insert(essenceRows)
 
-        // Decrementar quantity_available de cada compra de essência utilizada
+        // Decrementar e auto-fechar em um único UPDATE atômico
         for (const e of essences) {
-          // Gap #6: GREATEST evita valor negativo
           await trx.raw(
-            'UPDATE supplies SET quantity_available = GREATEST(0, quantity_available - ?) WHERE id = ?',
-            [parseFloat(e.quantity), parseInt(e.supply_id)]
+            `UPDATE supplies
+             SET quantity_available = GREATEST(0, quantity_available - ?),
+                 is_open = CASE WHEN GREATEST(0, quantity_available - ?) <= 0 THEN false ELSE is_open END
+             WHERE id = ?`,
+            [parseFloat(e.quantity), parseFloat(e.quantity), parseInt(e.supply_id)]
           )
-
-          // Auto-fechar se esgotou
-          const afterDecrement = await trx('supplies').where('id', parseInt(e.supply_id)).first()
-          if (parseFloat(afterDecrement.quantity_available || 0) <= 0) {
-            await trx('supplies')
-              .where('id', parseInt(e.supply_id))
-              .update({ is_open: false, quantity_available: 0 })
-          }
         }
       }
 
