@@ -15,8 +15,9 @@ const supplyRules = [
   body('total_amount_paid').isFloat({ min: 0 }).withMessage('Total amount must be >= 0'),
 ]
 
-router.get   ('/',          ctrl.list)
-router.get   ('/stats',     ctrl.stats)
+router.get   ('/',                    ctrl.list)
+router.get   ('/stats',               ctrl.stats)
+router.get   ('/:id/consumption', [param('id').isInt()], validate, ctrl.getConsumption)
 router.get   ('/:id', [param('id').isInt()], validate, ctrl.getOne)
 router.post  ('/test', (req, res) => {
   console.log('🧪 ROTA DE TESTE EXECUTADA')

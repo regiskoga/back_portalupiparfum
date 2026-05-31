@@ -253,4 +253,44 @@ async function toggleOpen (req, res) {
   }
 }
 
-module.exports = { list, getOne, create, update, remove, stats, toggleOpen }
+// ─── CONSUMPTION HISTORY ──────────────────────────────────────────────────────
+async function getConsumption (req, res) {
+  try {
+    const id = parseInt(req.params.id)
+
+    const supply = await db('supplies')
+      .where({ id })
+      .select('id', 'name', 'unit', 'quantity_purchased', 'quantity_available')
+      .first()
+    if (!supply) return res.status(404).json({ error: 'Supply not found' })
+
+    const history = await db('batch_essences as be')
+      .join('batches as b', 'b.id', 'be.batch_id')
+      .leftJoin('formulas as f', 'f.id', 'b.formula_id')
+      .leftJoin('products as p', 'p.id', 'f.product_id')
+      .where('be.supply_id', id)
+      .select(
+        'be.id',
+        'be.quantity',
+        'be.unit',
+        'be.essence_code',
+        'be.supplier_lot_ref',
+        'be.created_at',
+        'b.id as batch_id',
+        'b.batch_code',
+        'b.production_date',
+        'b.status as batch_status',
+        'f.name as formula_name',
+        'p.commercial_name as product_name'
+      )
+      .orderBy('be.created_at', 'desc')
+
+    const total_consumed = history.reduce((s, r) => s + parseFloat(r.quantity || 0), 0)
+
+    res.json({ supply, total_consumed, history })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
+module.exports = { list, getOne, create, update, remove, stats, toggleOpen, getConsumption }
