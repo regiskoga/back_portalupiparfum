@@ -39,9 +39,9 @@ exports.up = async function (knex) {
   if (items.length > 0) {
     await knex('order_item_bottlings').insert(
       items.map(i => ({
-        order_item_id: i.id,
-        bottling_id:   i.bottling_id,
-        quantity:      i.quantity,
+        order_item_id: parseInt(i.id,          10),
+        bottling_id:   parseInt(i.bottling_id, 10),
+        quantity:      Math.max(1, parseInt(i.quantity, 10) || 1),
       }))
     )
   }
