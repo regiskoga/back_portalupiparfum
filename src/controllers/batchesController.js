@@ -672,17 +672,25 @@ async function stockSummary (req, res) {
       .whereNotNull('b.product_id')
       .groupBy('b.product_id', 'p.project_name', 'p.commercial_name')
 
-    // ml comprometido em pedidos ativos SEM envase vinculado
-    // (itens com bottling_id já têm frasco físico; saem do comprometido do lote)
+    // ml comprometido = quantidade ainda não coberta por envase vinculado × volume
+    // Uma vez que o item tem todos os envases vinculados, sai do comprometido.
     const ACTIVE_STATUSES = ['Pending', 'Confirmed', 'In Production', 'Ready']
     const committed = await db('order_items as oi')
       .join('orders as o', 'o.id', 'oi.order_id')
+      .leftJoin(
+        db('order_item_bottlings')
+          .select('order_item_id')
+          .sum('quantity as total_linked')
+          .groupBy('order_item_id')
+          .as('oib_sum'),
+        'oib_sum.order_item_id', 'oi.id'
+      )
       .select(
         'oi.product_id',
-        db.raw('COALESCE(SUM(oi.volume_ml * oi.quantity), 0) as committed_ml')
+        db.raw('COALESCE(SUM(GREATEST(0, oi.quantity - COALESCE(oib_sum.total_linked, 0)) * oi.volume_ml), 0) as committed_ml')
       )
       .whereIn('o.status', ACTIVE_STATUSES)
-      .whereNull('oi.bottling_id')
+      .whereNotNull('oi.product_id')
       .groupBy('oi.product_id')
 
     const committedMap = {}
