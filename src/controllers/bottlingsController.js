@@ -20,7 +20,7 @@ async function generateBottlingCode () {
 // ─── LIST BOTTLINGS ───────────────────────────────────────────────────────────
 async function list(req, res) {
   try {
-    const { search, start_date, end_date, product_id, volume_ml } = req.query
+    const { search, start_date, end_date, product_id, volume_ml, type } = req.query
 
     let query = db('bottlings as bt')
       .select(
@@ -31,6 +31,10 @@ async function list(req, res) {
       .leftJoin('supplies as bs', 'bs.id', 'bt.bottle_supply_id')
       .leftJoin('supplies as ls', 'ls.id', 'bt.label_supply_id')
       .orderBy('bt.bottling_date', 'desc')
+
+    if (type === 'brinde' || type === 'normal') {
+      query = query.where('bt.type', type)
+    }
 
     // Filtros
     if (search) {
@@ -148,8 +152,10 @@ async function create(req, res) {
       bottle_supply_id = null,
       label_supply_id = null,
       batches = [],
-      notes = ''
+      notes = '',
+      type = 'normal'
     } = req.body
+    const bottlingType = type === 'brinde' ? 'brinde' : 'normal'
 
     const bottling_code = providedCode && providedCode.trim() ? providedCode.trim() : await generateBottlingCode()
     const chorinhoPct = parseFloat(await getParam('chorinho_tolerance_pct', 5)) / 100
@@ -255,6 +261,7 @@ async function create(req, res) {
         unit_cost: unitCost,
         quantity_available: parseInt(quantity),
         notes,
+        type: bottlingType,
         active: true
       }).returning('*')
       
@@ -406,6 +413,19 @@ async function remove(req, res) {
       const list = activeLinked.map(o => `${o.code} (${o.status})`).join(', ')
       return res.status(409).json({
         error: `Envase não pode ser excluído pois está vinculado ao(s) pedido(s) ativo(s): ${list}. Desvincule os itens antes de excluir.`
+      })
+    }
+
+    // Idem para brindes vinculados via order_gifts
+    const giftLinked = await db('order_gifts as og')
+      .join('orders as o', 'o.id', 'og.order_id')
+      .where('og.bottling_id', parseInt(req.params.id))
+      .select('o.code', 'o.status')
+
+    if (giftLinked.length > 0) {
+      const list = giftLinked.map(o => `${o.code} (${o.status})`).join(', ')
+      return res.status(409).json({
+        error: `Envase de brinde não pode ser excluído pois está vinculado ao(s) pedido(s): ${list}. Remova os brindes desses pedidos antes.`
       })
     }
 
@@ -602,11 +622,123 @@ async function getBatchesInMaceration(req, res) {
   }
 }
 
+// ─── GET AVAILABLE GIFT BOTTLINGS ─────────────────────────────────────────────
+// Lista envases do tipo brinde com saldo disponível para vincular em pedidos.
+async function getAvailableGifts (req, res) {
+  try {
+    const rows = await db('bottlings')
+      .where('type', 'brinde')
+      .where('active', true)
+      .where('quantity_available', '>', 0)
+      .select(
+        'id',
+        'bottling_code',
+        'product_name',
+        'product_ref',
+        'volume_ml',
+        'quantity',
+        'quantity_available',
+        'unit_cost',
+        'bottling_date'
+      )
+      .orderBy('product_name')
+      .orderBy('volume_ml')
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
+// ─── GET ORDERS THAT CONSUMED A BOTTLING (Reverse Logistics) ──────────────────
+// Retorna a lista de pedidos/clientes que consumiram um envase específico.
+// Inclui vínculos legados via order_items.bottling_id e os novos via order_item_bottlings.
+async function getOrdersConsumingBottling (req, res) {
+  try {
+    const bottlingId = parseInt(req.params.id)
+
+    const bottling = await db('bottlings').where('id', bottlingId).first()
+    if (!bottling) {
+      return res.status(404).json({ error: 'Bottling not found' })
+    }
+
+    // Vínculos via junction table (atual)
+    const fromJunction = await db('order_item_bottlings as oib')
+      .join('order_items as oi', 'oi.id', 'oib.order_item_id')
+      .join('orders as o', 'o.id', 'oi.order_id')
+      .join('customers as c', 'c.id', 'o.customer_id')
+      .where('oib.bottling_id', bottlingId)
+      .select(
+        'o.id as order_id',
+        'o.code as order_code',
+        'o.status as order_status',
+        'o.created_at as order_date',
+        'c.id as customer_id',
+        'c.name as customer_name',
+        'c.phone as customer_phone',
+        'oi.id as order_item_id',
+        'oi.product_name',
+        'oi.product_ref',
+        'oib.quantity as bottling_quantity',
+        'oi.quantity as item_quantity',
+        'oi.unit_price'
+      )
+      .orderBy('o.created_at', 'desc')
+
+    // Vínculos legados (coluna order_items.bottling_id ainda existir)
+    let fromLegacy = []
+    const hasLegacyCol = await db.schema.hasColumn('order_items', 'bottling_id')
+    if (hasLegacyCol) {
+      fromLegacy = await db('order_items as oi')
+        .join('orders as o', 'o.id', 'oi.order_id')
+        .join('customers as c', 'c.id', 'o.customer_id')
+        .where('oi.bottling_id', bottlingId)
+        .whereNotExists(
+          db('order_item_bottlings as oib')
+            .whereRaw('oib.order_item_id = oi.id')
+            .select(1)
+        )
+        .select(
+          'o.id as order_id',
+          'o.code as order_code',
+          'o.status as order_status',
+          'o.created_at as order_date',
+          'c.id as customer_id',
+          'c.name as customer_name',
+          'c.phone as customer_phone',
+          'oi.id as order_item_id',
+          'oi.product_name',
+          'oi.product_ref',
+          'oi.quantity as bottling_quantity',
+          'oi.quantity as item_quantity',
+          'oi.unit_price'
+        )
+        .orderBy('o.created_at', 'desc')
+    }
+
+    const orders = [...fromJunction, ...fromLegacy]
+      .sort((a, b) => new Date(b.order_date) - new Date(a.order_date))
+
+    const totalConsumed = orders.reduce((sum, o) => sum + parseInt(o.bottling_quantity || 0), 0)
+
+    res.json({
+      bottling_id: bottlingId,
+      bottling_code: bottling.bottling_code,
+      total_produced: parseInt(bottling.quantity || 0),
+      total_consumed: totalConsumed,
+      total_available: parseInt(bottling.quantity_available || 0),
+      orders
+    })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+}
+
 // ─── STOCK SUMMARY ────────────────────────────────────────────────────────────
 async function stockSummary (req, res) {
   try {
     const rows = await db('bottlings')
       .where('active', true)
+      .where('type', 'normal')
       .where('quantity_available', '>', 0)
       .select('product_name', 'volume_ml')
       .sum('quantity_available as total_available')
@@ -642,5 +774,7 @@ module.exports = {
   stats,
   getAvailableBatches,
   getBatchesInMaceration,
-  stockSummary
+  stockSummary,
+  getOrdersConsumingBottling,
+  getAvailableGifts
 }

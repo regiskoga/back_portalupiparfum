@@ -15,7 +15,8 @@ const bottlingRules = [
   body('batches').isArray({ min: 1 }).withMessage('At least one batch is required'),
   body('batches.*.batch_id').isInt({ min: 1 }).withMessage('Valid batch ID required'),
   body('batches.*.ml_used').isFloat({ gt: 0 }).withMessage('ML used must be greater than 0'),
-  body('notes').optional().trim()
+  body('notes').optional().trim(),
+  body('type').optional().isIn(['normal', 'brinde']).withMessage("type deve ser 'normal' ou 'brinde'")
 ]
 
 const updateBottlingRules = [
@@ -29,6 +30,8 @@ router.get('/stats', ctrl.stats)
 router.get('/stock-summary', ctrl.stockSummary)
 router.get('/available-batches', ctrl.getAvailableBatches)
 router.get('/in-maceration', ctrl.getBatchesInMaceration)
+router.get('/gifts-available', ctrl.getAvailableGifts)
+router.get('/:id/orders', [param('id').isInt()], validate, ctrl.getOrdersConsumingBottling)
 router.get('/:id', [param('id').isInt()], validate, ctrl.getOne)
 router.post('/', bottlingRules, validate, ctrl.create)
 router.patch('/:id', [param('id').isInt(), ...updateBottlingRules], validate, ctrl.update)

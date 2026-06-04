@@ -6,8 +6,13 @@
 const express = require('express')
 const router = express.Router()
 const ordersController = require('../controllers/ordersController')
+const orderGiftsRouter = require('./orderGifts')
 const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
+
+// Sub-router: brindes do pedido (montado abaixo para garantir prioridade
+// sobre rotas com pattern :id que viriam depois).
+router.use('/:order_id/gifts', orderGiftsRouter)
 
 /**
  * GET /api/orders

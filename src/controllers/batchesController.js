@@ -659,13 +659,15 @@ async function nextCode (req, res) {
 // ─── STOCK SUMMARY (saldo real por produto) ───────────────────────────────────
 async function stockSummary (req, res) {
   try {
-    // ml disponível em lotes ativos por produto
+    // ml disponível em lotes ativos por produto, separando "pronto" de "macerando"
     const batchStock = await db('batches as b')
       .leftJoin('products as p', 'p.id', 'b.product_id')
       .select(
         'b.product_id',
         'p.project_name',
         'p.commercial_name',
+        db.raw(`COALESCE(SUM(CASE WHEN b.status = 'Em maceração' THEN b.remaining_ml ELSE 0 END), 0) as macerating_ml`),
+        db.raw(`COALESCE(SUM(CASE WHEN b.status <> 'Em maceração' THEN b.remaining_ml ELSE 0 END), 0) as ready_ml`),
         db.raw('COALESCE(SUM(b.remaining_ml), 0) as total_ml')
       )
       .whereNot('b.status', 'Finalizado')
@@ -697,15 +699,20 @@ async function stockSummary (req, res) {
     committed.forEach(r => { committedMap[r.product_id] = parseFloat(r.committed_ml || 0) })
 
     const summary = batchStock.map(row => {
-      const total_ml     = parseFloat(row.total_ml || 0)
-      const committed_ml = committedMap[row.product_id] || 0
+      const total_ml      = parseFloat(row.total_ml      || 0)
+      const ready_ml      = parseFloat(row.ready_ml      || 0)
+      const macerating_ml = parseFloat(row.macerating_ml || 0)
+      const committed_ml  = committedMap[row.product_id] || 0
       return {
-        product_id:     row.product_id,
-        project_name:   row.project_name,
+        product_id:      row.product_id,
+        project_name:    row.project_name,
         commercial_name: row.commercial_name,
         total_ml,
+        ready_ml,
+        macerating_ml,
         committed_ml,
-        available_ml: Math.max(0, total_ml - committed_ml),
+        // Disponível só conta o que está pronto para envase
+        available_ml: Math.max(0, ready_ml - committed_ml),
       }
     })
 
