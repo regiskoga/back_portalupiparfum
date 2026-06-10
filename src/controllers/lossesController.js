@@ -134,6 +134,7 @@ exports.create = async (req, res) => {
         await trx('supplies')
           .where({ id: item_id })
           .decrement('quantity_available', quantity_lost)
+        await trx.raw('UPDATE supplies SET is_open = false WHERE id = ? AND quantity_available <= 0', [item_id])
 
         break
 

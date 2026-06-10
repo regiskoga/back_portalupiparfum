@@ -1,32 +1,54 @@
 const { db } = require('../models/db')
 const ActivityLogger = require('../services/activityLogger')
+const { tickAutoFinishMaceration, parseLocalDate, todayLocal, dayDiff } = require('../services/macerationService')
 
 async function getParam (key, defaultValue) {
   const row = await db('parameters').where('key', key).first()
   return row ? row.value : String(defaultValue)
 }
 
+function buildMacerationInfo (batch, macerationDays, today) {
+  const startDate = parseLocalDate(batch.maceration_start)
+  const endDate   = parseLocalDate(batch.maceration_end)
+  if (!startDate || !endDate) return null
+
+  // Produção = dia 1. Em D+9 → dia 10 (último dia). Em D+10 → maceração concluída.
+  // "days_remaining" = quantos dias ainda restam do processo (não inclui o dia atual).
+  const elapsed       = Math.max(0, dayDiff(today, startDate))
+  const currentDay    = Math.min(macerationDays, elapsed + 1)
+  const daysRemaining = Math.max(0, macerationDays - currentDay)
+  const isReady       = elapsed >= macerationDays
+  const progressPct   = Math.min(100, Math.max(0, Math.round((elapsed / macerationDays) * 100)))
+
+  return {
+    total_days: macerationDays,
+    current_day: currentDay,
+    days_remaining: daysRemaining,
+    is_ready: isReady,
+    progress_percentage: progressPct,
+    maceration_start: batch.maceration_start,
+    maceration_end: batch.maceration_end,
+  }
+}
+
 // ─── GENERATE BATCH CODE ──────────────────────────────────────────────────────
-// Formato: L_PPPPP_FFFFF_YYYYMMDD_N
-// PPPPP = product_id 5 dígitos | FFFFF = formula_id 5 dígitos | N = lotes do projeto
-async function generateBatchCode (product_id, formula_id, production_date) {
+// Formato: L_PPPPP_FFFFF_YYYYMMDD_N  (N vem de getNextReducedLotNumber — nunca recalculado aqui)
+function generateBatchCode (product_id, formula_id, production_date, N) {
   const paddedProject = String(product_id || 0).padStart(5, '0')
   const paddedFormula = String(formula_id || 0).padStart(5, '0')
   const datePart = (production_date || new Date().toISOString().slice(0, 10)).replace(/-/g, '')
-
-  const { max } = await db('batches')
-    .where('product_id', product_id)
-    .max('reduced_lot_number as max')
-    .first()
-
-  const N = parseInt(max || 0) + 1
   return `L_${paddedProject}_${paddedFormula}_${datePart}_${N}`
 }
 
 // ─── REDUCED LOT NUMBER ───────────────────────────────────────────────────────
 async function getNextReducedLotNumber (product_id) {
-  if (!product_id) return 1
-  const { max } = await db('batches').where('product_id', product_id).max('reduced_lot_number as max').first()
+  let query = db('batches')
+  if (product_id) {
+    query = query.where('product_id', product_id)
+  } else {
+    query = query.whereNull('product_id')
+  }
+  const { max } = await query.max('reduced_lot_number as max').first()
   return parseInt(max || 0) + 1
 }
 
@@ -34,6 +56,8 @@ async function getNextReducedLotNumber (product_id) {
 async function list(req, res) {
   try {
     const { formula_id, product_id, status, search } = req.query
+
+    await tickAutoFinishMaceration()
 
     let query = db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
@@ -66,29 +90,18 @@ async function list(req, res) {
           .orWhere('p.commercial_name', 'ilike', `%${search}%`)
       })
     }
-    
+
     const batches = await query
-    
-    // Adicionar informações de maceração
+
+    const macerationDays = parseInt(await getParam('maceration_days', 10))
+    const today = todayLocal()
+
     const batchesWithMaceration = batches.map(batch => {
-      if (batch.maceration_start && batch.maceration_end) {
-        const today = new Date()
-        const startDate = new Date(batch.maceration_start)
-        const endDate = new Date(batch.maceration_end)
-        const daysRemaining = Math.ceil((endDate - today) / (1000 * 60 * 60 * 24))
-        const totalMs = endDate - startDate
-        const elapsedMs = today - startDate
-
-        batch.maceration_info = {
-          days_remaining: Math.max(0, daysRemaining),
-          is_ready: daysRemaining <= 0,
-          progress_percentage: Math.min(100, Math.max(0, (elapsedMs / totalMs) * 100))
-        }
-      }
-
+      const info = buildMacerationInfo(batch, macerationDays, today)
+      if (info) batch.maceration_info = info
       return batch
     })
-    
+
     res.json(batchesWithMaceration)
   } catch (error) {
     res.status(500).json({ error: error.message })
@@ -98,6 +111,8 @@ async function list(req, res) {
 // ─── GET ONE BATCH ────────────────────────────────────────────────────────────
 async function getOne(req, res) {
   try {
+    await tickAutoFinishMaceration()
+
     const batch = await db('batches as b')
       .join('formulas as f', 'f.id', 'b.formula_id')
       .leftJoin('products as p', 'p.id', 'b.product_id')
@@ -135,20 +150,10 @@ async function getOne(req, res) {
       .orderBy('fi.order_index', 'asc')
     
     // Calcular informações de maceração
-    if (batch.maceration_start && batch.maceration_end) {
-      const today = new Date()
-      const startDate = new Date(batch.maceration_start)
-      const endDate = new Date(batch.maceration_end)
-      const daysRemaining = Math.ceil((endDate - today) / (1000 * 60 * 60 * 24))
-      const totalMs = endDate - startDate
-      const elapsedMs = today - startDate
-
-      batch.maceration_info = {
-        days_remaining: Math.max(0, daysRemaining),
-        is_ready: daysRemaining <= 0,
-        progress_percentage: Math.min(100, Math.max(0, (elapsedMs / totalMs) * 100))
-      }
-    }
+    const macerationDays = parseInt(await getParam('maceration_days', 10))
+    const today = todayLocal()
+    const info = buildMacerationInfo(batch, macerationDays, today)
+    if (info) batch.maceration_info = info
     
     // Buscar essências usadas no lote
     const batchEssences = await db('batch_essences as be')
@@ -184,7 +189,8 @@ async function create(req, res) {
       production_date,
       quantity_ml: providedQty,
       chorinho_ml: providedChorinho = 0,
-      essences = [],   // [{ supply_id, quantity, unit }]
+      essences = [],        // [{ supply_id, quantity, unit }]
+      formulaItems = [],    // [{ supply_id, quantity, unit }] — álcool, água, etc.
       notes = '',
       start_maceration = true
     } = req.body
@@ -269,12 +275,13 @@ async function create(req, res) {
     const totalCost = essenceCost + insumosCost
     const costPerMl = actual_ml > 0 ? totalCost / actual_ml : 0
 
-    // Lote reduzido e código
+    // Lote reduzido e código — N calculado uma vez, usado em ambos
     const reduced_lot_number = await getNextReducedLotNumber(product_id ? parseInt(product_id) : null)
-    const batch_code = providedCode?.trim() || await generateBatchCode(
+    const batch_code = providedCode?.trim() || generateBatchCode(
       product_id ? parseInt(product_id) : 0,
       parseInt(formula_id),
-      production_date
+      production_date,
+      reduced_lot_number
     )
 
     // Datas de maceração
@@ -336,6 +343,27 @@ async function create(req, res) {
                  is_open = CASE WHEN GREATEST(0, quantity_available - ?) <= 0 THEN false ELSE is_open END
              WHERE id = ?`,
             [parseFloat(e.quantity), parseFloat(e.quantity), parseInt(e.supply_id)]
+          )
+        }
+      }
+
+      // Registrar insumos de fórmula (álcool, água, etc.) e decrementar estoque
+      const validFormulaItems = (Array.isArray(formulaItems) ? formulaItems : [])
+        .filter(fi => fi.supply_id && parseFloat(fi.quantity) > 0)
+      if (validFormulaItems.length > 0) {
+        await trx('batch_formula_items').insert(validFormulaItems.map(fi => ({
+          batch_id:  batch.id,
+          supply_id: parseInt(fi.supply_id),
+          quantity:  parseFloat(fi.quantity),
+          unit:      fi.unit || 'ml',
+        })))
+        for (const fi of validFormulaItems) {
+          await trx.raw(
+            `UPDATE supplies
+             SET quantity_available = GREATEST(0, quantity_available - ?),
+                 is_open = CASE WHEN GREATEST(0, quantity_available - ?) <= 0 THEN false ELSE is_open END
+             WHERE id = ?`,
+            [parseFloat(fi.quantity), parseFloat(fi.quantity), parseInt(fi.supply_id)]
           )
         }
       }
@@ -601,13 +629,18 @@ async function mergeBatches (req, res) {
     }, 0)
 
     const costPerMl = totalMl > 0 ? totalCost / totalMl : 0
-    const batch_code = await generateBatchCode()
     const today = new Date().toISOString().slice(0, 10)
+    // Herdar product_id do primeiro lote (todos devem ser do mesmo produto)
+    const mergedProductId = batches[0].product_id || null
+    const reduced_lot_number = await getNextReducedLotNumber(mergedProductId)
+    const batch_code = generateBatchCode(mergedProductId || 0, parseInt(formula_id), today, reduced_lot_number)
 
     const result = await db.transaction(async (trx) => {
       const [newBatch] = await trx('batches').insert({
         formula_id: parseInt(formula_id),
+        product_id: mergedProductId,
         batch_code,
+        reduced_lot_number,
         production_date: today,
         quantity_ml: totalMl,
         remaining_ml: totalMl,
@@ -644,12 +677,13 @@ async function mergeBatches (req, res) {
 async function nextCode (req, res) {
   try {
     const { product_id, formula_id, production_date } = req.query
-    const code = await generateBatchCode(
+    const reduced_lot_number = await getNextReducedLotNumber(product_id ? parseInt(product_id) : null)
+    const code = generateBatchCode(
       product_id ? parseInt(product_id) : 0,
       formula_id ? parseInt(formula_id) : 0,
-      production_date || null
+      production_date || null,
+      reduced_lot_number
     )
-    const reduced_lot_number = await getNextReducedLotNumber(product_id ? parseInt(product_id) : null)
     res.json({ batch_code: code, reduced_lot_number })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -659,7 +693,11 @@ async function nextCode (req, res) {
 // ─── STOCK SUMMARY (saldo real por produto) ───────────────────────────────────
 async function stockSummary (req, res) {
   try {
-    // ml disponível em lotes ativos por produto, separando "pronto" de "macerando"
+    // Garante que lotes que já terminaram maceração tenham flipado pra "Pronto para envase".
+    await tickAutoFinishMaceration()
+
+    // ml disponível em lotes ativos por produto, separando "pronto" de "macerando".
+    // earliest_maceration_end = MIN(maceration_end) entre lotes ainda em maceração (com saldo).
     const batchStock = await db('batches as b')
       .leftJoin('products as p', 'p.id', 'b.product_id')
       .select(
@@ -668,7 +706,8 @@ async function stockSummary (req, res) {
         'p.commercial_name',
         db.raw(`COALESCE(SUM(CASE WHEN b.status = 'Em maceração' THEN b.remaining_ml ELSE 0 END), 0) as macerating_ml`),
         db.raw(`COALESCE(SUM(CASE WHEN b.status <> 'Em maceração' THEN b.remaining_ml ELSE 0 END), 0) as ready_ml`),
-        db.raw('COALESCE(SUM(b.remaining_ml), 0) as total_ml')
+        db.raw('COALESCE(SUM(b.remaining_ml), 0) as total_ml'),
+        db.raw(`MIN(CASE WHEN b.status = 'Em maceração' AND b.remaining_ml > 0 THEN b.maceration_end ELSE NULL END) as earliest_maceration_end`)
       )
       .whereNot('b.status', 'Finalizado')
       .whereNotNull('b.product_id')
@@ -698,11 +737,25 @@ async function stockSummary (req, res) {
     const committedMap = {}
     committed.forEach(r => { committedMap[r.product_id] = parseFloat(r.committed_ml || 0) })
 
+    const today = todayLocal()
+
     const summary = batchStock.map(row => {
       const total_ml      = parseFloat(row.total_ml      || 0)
       const ready_ml      = parseFloat(row.ready_ml      || 0)
       const macerating_ml = parseFloat(row.macerating_ml || 0)
       const committed_ml  = committedMap[row.product_id] || 0
+
+      let earliest_maceration_end = null
+      let days_until_ready = null
+      const end = parseLocalDate(row.earliest_maceration_end)
+      if (end) {
+        const y = end.getFullYear()
+        const m = String(end.getMonth() + 1).padStart(2, '0')
+        const d = String(end.getDate()).padStart(2, '0')
+        earliest_maceration_end = `${y}-${m}-${d}`
+        days_until_ready = Math.max(0, dayDiff(end, today))
+      }
+
       return {
         product_id:      row.product_id,
         project_name:    row.project_name,
@@ -713,6 +766,9 @@ async function stockSummary (req, res) {
         committed_ml,
         // Disponível só conta o que está pronto para envase
         available_ml: Math.max(0, ready_ml - committed_ml),
+        // Data prevista de liberação do lote em maceração mais próximo (null se não há).
+        earliest_maceration_end,
+        days_until_ready,
       }
     })
 

@@ -293,7 +293,7 @@ async function create(req, res) {
           .where('id', parseInt(batchData.batch_id))
           .update({
             remaining_ml: newRemainingMl,
-            status: newRemainingMl <= 0 ? 'Finalizado' : batch.status,
+            status: newRemainingMl <= 0 && batch.status !== 'Em maceração' ? 'Finalizado' : batch.status,
             updated_at: trx.fn.now()
           })
         
@@ -338,22 +338,24 @@ async function create(req, res) {
         const bottleSupply = await trx('supplies').where('id', parseInt(bottle_supply_id)).first()
         if (!bottleSupply) throw new Error('Frasco não encontrado')
         if (parseFloat(bottleSupply.quantity_available) < parseInt(quantity)) {
-          throw new Error(`Estoque insuficiente de frascos. Disponível: ${bottleSupply.quantity_available} ${bottleSupply.unit}`)
+          throw new Error(`Estoque insuficiente de frascos "${bottleSupply.name}". Disponível: ${bottleSupply.quantity_available} ${bottleSupply.unit}, solicitado: ${quantity}. Corrija o estoque na tela de Insumos se necessário.`)
         }
         await trx('supplies')
           .where('id', parseInt(bottle_supply_id))
           .decrement('quantity_available', parseInt(quantity))
+        await trx.raw('UPDATE supplies SET is_open = false WHERE id = ? AND quantity_available <= 0', [parseInt(bottle_supply_id)])
       }
 
       if (label_supply_id) {
         const labelSupply = await trx('supplies').where('id', parseInt(label_supply_id)).first()
         if (!labelSupply) throw new Error('Rótulo não encontrado')
         if (parseFloat(labelSupply.quantity_available) < parseInt(quantity)) {
-          throw new Error(`Estoque insuficiente de rótulos. Disponível: ${labelSupply.quantity_available} ${labelSupply.unit}`)
+          throw new Error(`Estoque insuficiente de rótulos "${labelSupply.name}". Disponível: ${labelSupply.quantity_available} ${labelSupply.unit}, solicitado: ${quantity}. Corrija o estoque na tela de Insumos se necessário.`)
         }
         await trx('supplies')
           .where('id', parseInt(label_supply_id))
           .decrement('quantity_available', parseInt(quantity))
+        await trx.raw('UPDATE supplies SET is_open = false WHERE id = ? AND quantity_available <= 0', [parseInt(label_supply_id)])
       }
       
       return bottling
@@ -661,7 +663,7 @@ async function getOrdersConsumingBottling (req, res) {
       return res.status(404).json({ error: 'Bottling not found' })
     }
 
-    // Vínculos via junction table (atual)
+    // Vínculos via junction table (item normal — atual)
     const fromJunction = await db('order_item_bottlings as oib')
       .join('order_items as oi', 'oi.id', 'oib.order_item_id')
       .join('orders as o', 'o.id', 'oi.order_id')
@@ -715,8 +717,35 @@ async function getOrdersConsumingBottling (req, res) {
         .orderBy('o.created_at', 'desc')
     }
 
-    const orders = [...fromJunction, ...fromLegacy]
-      .sort((a, b) => new Date(b.order_date) - new Date(a.order_date))
+    // Vínculos como brinde (envase tipo brinde dado em pedido via order_gifts)
+    let fromGifts = []
+    const hasGiftsTable = await db.schema.hasTable('order_gifts')
+    if (hasGiftsTable) {
+      fromGifts = await db('order_gifts as og')
+        .join('orders as o', 'o.id', 'og.order_id')
+        .join('customers as c', 'c.id', 'o.customer_id')
+        .where('og.bottling_id', bottlingId)
+        .select(
+          'o.id as order_id',
+          'o.code as order_code',
+          'o.status as order_status',
+          'o.created_at as order_date',
+          'c.id as customer_id',
+          'c.name as customer_name',
+          'c.phone as customer_phone',
+          'og.id as order_gift_id',
+          'og.quantity as bottling_quantity',
+          'og.notes as gift_notes'
+        )
+        .orderBy('o.created_at', 'desc')
+    }
+
+    const tagged = [
+      ...fromJunction.map(r => ({ ...r, link_type: 'item' })),
+      ...fromLegacy.map(r  => ({ ...r, link_type: 'item' })),
+      ...fromGifts.map(r   => ({ ...r, link_type: 'gift' })),
+    ]
+    const orders = tagged.sort((a, b) => new Date(b.order_date) - new Date(a.order_date))
 
     const totalConsumed = orders.reduce((sum, o) => sum + parseInt(o.bottling_quantity || 0), 0)
 

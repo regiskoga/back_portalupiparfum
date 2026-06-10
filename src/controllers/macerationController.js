@@ -1,4 +1,5 @@
 const { db } = require('../models/db')
+const { tickAutoFinishMaceration, parseLocalDate, todayLocal, dayDiff } = require('../services/macerationService')
 
 async function getParam (key, defaultValue) {
   const row = await db('parameters').where('key', key).first()
@@ -10,16 +11,17 @@ function locationForDay (dayNumber) {
   return dayNumber % 2 === 1 ? 'geladeira' : 'fora'
 }
 
-function dayDiff (laterDate, earlierDate) {
-  const a = new Date(laterDate); a.setHours(0, 0, 0, 0)
-  const b = new Date(earlierDate); b.setHours(0, 0, 0, 0)
-  return Math.floor((a - b) / (1000 * 60 * 60 * 24))
+function formatLocalDate (d) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
 }
 
 // Constrói o cronograma diário para um lote a partir de maceration_start e dos checkins existentes.
 function buildSchedule (batch, checkins, today, totalDays) {
-  const startDate = new Date(batch.maceration_start)
-  startDate.setHours(0, 0, 0, 0)
+  const startDate = parseLocalDate(batch.maceration_start)
+  if (!startDate) return []
 
   const checkinByDay = {}
   for (const c of checkins) checkinByDay[c.day_number] = c
@@ -32,7 +34,7 @@ function buildSchedule (batch, checkins, today, totalDays) {
     const checkin = checkinByDay[d] || null
     days.push({
       day_number: d,
-      date: dayDate.toISOString().slice(0, 10),
+      date: formatLocalDate(dayDate),
       expected_location: expected,
       done: !!checkin,
       checked_at: checkin?.checked_at || null,
@@ -50,6 +52,8 @@ function buildSchedule (batch, checkins, today, totalDays) {
 // Por padrão lista apenas lotes em maceração ativa. Aceita ?include_finished=true.
 async function list (req, res) {
   try {
+    await tickAutoFinishMaceration()
+
     const includeFinished = String(req.query.include_finished || '').toLowerCase() === 'true'
     const totalDays = parseInt(await getParam('maceration_days', 10))
 
@@ -95,22 +99,18 @@ async function list (req, res) {
       checkinsByBatch[c.batch_id].push(c)
     }
 
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
+    const today = todayLocal()
 
     const enriched = batches.map(batch => {
-      const startDate = new Date(batch.maceration_start)
-      startDate.setHours(0, 0, 0, 0)
-      const endDate = batch.maceration_end ? new Date(batch.maceration_end) : null
-      if (endDate) endDate.setHours(0, 0, 0, 0)
+      const startDate = parseLocalDate(batch.maceration_start)
+      const endDate = parseLocalDate(batch.maceration_end)
 
       const elapsed = Math.max(0, dayDiff(today, startDate))
       const currentDay = Math.min(totalDays, elapsed + 1)
-      const remaining = endDate ? Math.max(0, dayDiff(endDate, today)) : 0
+      const remaining = Math.max(0, totalDays - currentDay)
       const schedule = buildSchedule(batch, checkinsByBatch[batch.id] || [], today, totalDays)
 
       const todayEntry = schedule.find(d => d.is_today) || null
-      const overdue = schedule.filter(d => d.is_past && !d.done).length
 
       return {
         ...batch,
@@ -118,9 +118,8 @@ async function list (req, res) {
         current_day: currentDay,
         days_remaining: remaining,
         progress_pct: Math.min(100, Math.round((elapsed / totalDays) * 100)),
-        is_ready: batch.status !== 'Em maceração' || (endDate && today >= endDate),
+        is_ready: batch.status !== 'Em maceração' || elapsed >= totalDays,
         today_action: todayEntry,
-        overdue_count: overdue,
         schedule
       }
     })
@@ -130,6 +129,60 @@ async function list (req, res) {
       total_days: totalDays,
       include_finished: includeFinished,
       batches: enriched
+    })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+}
+
+// ─── GET ONE BATCH SCHEDULE ───────────────────────────────────────────────────
+// Retorna o cronograma de maceração de um único lote (usado pelo modal "Em maceração" da tela de lotes).
+async function getOne (req, res) {
+  try {
+    await tickAutoFinishMaceration()
+
+    const batchId = parseInt(req.params.batch_id)
+    const totalDays = parseInt(await getParam('maceration_days', 10))
+
+    const batch = await db('batches as b')
+      .join('formulas as f', 'f.id', 'b.formula_id')
+      .leftJoin('products as p', 'p.id', 'b.product_id')
+      .select(
+        'b.id', 'b.batch_code', 'b.reduced_lot_number',
+        'b.production_date', 'b.maceration_start', 'b.maceration_end',
+        'b.remaining_ml', 'b.status',
+        'f.name as formula_name',
+        'p.project_name', 'p.commercial_name'
+      )
+      .where('b.id', batchId)
+      .first()
+
+    if (!batch) return res.status(404).json({ error: 'Lote não encontrado' })
+    if (!batch.maceration_start) {
+      return res.status(400).json({ error: 'Lote não está em maceração' })
+    }
+
+    const checkins = await db('maceration_checkins')
+      .where('batch_id', batchId)
+      .orderBy('day_number', 'asc')
+
+    const today = todayLocal()
+    const startDate = parseLocalDate(batch.maceration_start)
+    const endDate = parseLocalDate(batch.maceration_end)
+
+    const elapsed = Math.max(0, dayDiff(today, startDate))
+    const currentDay = Math.min(totalDays, elapsed + 1)
+    const remaining = Math.max(0, totalDays - currentDay)
+    const schedule = buildSchedule(batch, checkins, today, totalDays)
+
+    res.json({
+      ...batch,
+      total_days: totalDays,
+      current_day: currentDay,
+      days_remaining: remaining,
+      progress_pct: Math.min(100, Math.round((elapsed / totalDays) * 100)),
+      is_ready: batch.status !== 'Em maceração' || elapsed >= totalDays,
+      schedule
     })
   } catch (error) {
     res.status(500).json({ error: error.message })
@@ -203,4 +256,4 @@ async function uncheckin (req, res) {
   }
 }
 
-module.exports = { list, checkin, uncheckin }
+module.exports = { list, getOne, checkin, uncheckin }

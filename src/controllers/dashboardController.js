@@ -1,8 +1,11 @@
 const { db } = require('../models/db')
+const { tickAutoFinishMaceration } = require('../services/macerationService')
 
 // ─── DASHBOARD OVERVIEW ───────────────────────────────────────────────────────
 async function getOverview(req, res) {
   try {
+    await tickAutoFinishMaceration()
+
     // Busca limiar de estoque baixo primeiro (query leve, necessária para a próxima)
     const overviewParams = await db('parameters')
       .whereIn('key', ['low_stock_supply_warning'])

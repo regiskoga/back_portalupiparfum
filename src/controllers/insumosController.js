@@ -155,6 +155,11 @@ async function update (req, res) {
       updateData.quantity_purchased = Number(quantity_purchased)
       updateData.quantity_available = Math.max(0, Number(supply.quantity_available) + delta)
     }
+    if (req.body.quantity_available !== undefined) {
+      const newQty = Math.max(0, Number(req.body.quantity_available))
+      updateData.quantity_available = newQty
+      if (newQty <= 0) updateData.is_open = false
+    }
     if (total_amount_paid !== undefined) updateData.total_amount_paid = Number(total_amount_paid)
     if (batch !== undefined) updateData.batch = batch
     if (notes !== undefined) updateData.notes = notes

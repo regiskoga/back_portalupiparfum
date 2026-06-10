@@ -33,10 +33,18 @@ async function list(req, res) {
       const productIds = products.map(p => p.id)
       const committed = await db('order_items as oi')
         .join('orders as o', 'o.id', 'oi.order_id')
+        .leftJoin(
+          db('order_item_bottlings')
+            .select('order_item_id')
+            .sum('quantity as total_linked')
+            .groupBy('order_item_id')
+            .as('oib_sum'),
+          'oib_sum.order_item_id', 'oi.id'
+        )
         .whereIn('oi.product_id', productIds)
         .whereIn('o.status', ['Pending', 'Confirmed', 'In Production', 'Ready'])
         .groupBy('oi.product_id')
-        .select('oi.product_id', db.raw('COALESCE(SUM(oi.quantity), 0) as committed_quantity'))
+        .select('oi.product_id', db.raw('COALESCE(SUM(GREATEST(0, oi.quantity - COALESCE(oib_sum.total_linked, 0))), 0) as committed_quantity'))
       const committedMap = Object.fromEntries(committed.map(r => [r.product_id, r.committed_quantity]))
       products.forEach(p => { p.committed_quantity = committedMap[p.id] || 0 })
     }
