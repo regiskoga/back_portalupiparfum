@@ -230,7 +230,7 @@ async function create(req, res) {
     const actual_ml = quantity_ml + chorinho_ml
 
     // Buscar itens da fórmula para calcular custo
-    const formulaItems = await db('formula_items as fi')
+    const costItems = await db('formula_items as fi')
       .join('supplies as s', 's.id', 'fi.supply_id')
       .select('fi.supply_id', 'fi.percentage', 's.unit_cost')
       .where('fi.formula_id', parseInt(formula_id))
@@ -267,7 +267,7 @@ async function create(req, res) {
     }
 
     // Custo dos demais insumos
-    const insumosCost = formulaItems.reduce((sum, item) => {
+    const insumosCost = costItems.reduce((sum, item) => {
       const itemQty = (quantity_ml * parseFloat(item.percentage)) / 100
       return sum + (parseFloat(item.unit_cost) * itemQty)
     }, 0)
