@@ -22,7 +22,11 @@ async function list(req, res) {
         'p.heart_notes',
         'p.base_notes',
         'p.bottle_photo_url',
-        'p.original_photo_url'
+        'p.original_photo_url',
+        'p.main_accords',
+        'p.perfumer',
+        'p.launch_year',
+        'p.day_night_profile'
       )
       .orderBy('p.project_name', 'asc')
 
@@ -95,6 +99,10 @@ async function list(req, res) {
       base_notes:       p.base_notes,
       bottle_photo_url:   p.bottle_photo_url,
       original_photo_url: p.original_photo_url,
+      main_accords:     p.main_accords,
+      perfumer:         p.perfumer,
+      launch_year:      p.launch_year,
+      day_night_profile: p.day_night_profile,
       prices:           priceMap[p.id] || [],
       disponivel:       availableSet.has(p.id),
     }))

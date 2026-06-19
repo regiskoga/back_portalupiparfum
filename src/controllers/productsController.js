@@ -1,5 +1,6 @@
 const { db } = require('../models/db')
 const ActivityLogger = require('../services/activityLogger')
+const fragranceService = require('../services/fragranceService')
 
 // ─── LIST PRODUCTS ────────────────────────────────────────────────────────────
 async function list(req, res) {
@@ -98,6 +99,10 @@ async function create(req, res) {
       catalog_status = null,
       bottle_photo_url = null,
       original_photo_url = null,
+      main_accords = '',
+      perfumer = '',
+      launch_year = null,
+      day_night_profile = null,
       narrative = '',
       top_notes = '',
       heart_notes = '',
@@ -115,6 +120,10 @@ async function create(req, res) {
       catalog_status,
       bottle_photo_url,
       original_photo_url,
+      main_accords,
+      perfumer,
+      launch_year,
+      day_night_profile,
       narrative,
       top_notes,
       heart_notes,
@@ -243,11 +252,37 @@ async function stats(req, res) {
   }
 }
 
+// ─── FRAGRANCE LOOKUP ─────────────────────────────────────────────────────────
+async function fragranceLookup(req, res) {
+  try {
+    const product = await db('products').where('id', parseInt(req.params.id)).first()
+    if (!product) return res.status(404).json({ error: 'Produto não encontrado' })
+
+    if (!product.inspiration_name) {
+      return res.status(422).json({ error: 'Preencha o campo "Nome Inspiração" antes de buscar dados externos' })
+    }
+
+    const result = await fragranceService.lookup(product.inspiration_name, product.inspiration_brand)
+
+    if (!result) {
+      return res.json({ found: false, message: 'Nenhum resultado encontrado na Fragella para esse perfume' })
+    }
+
+    res.json(result)
+  } catch (error) {
+    const msg = error.response?.status === 401
+      ? 'API key inválida — verifique a variável FRAGELLA_API_KEY'
+      : error.message
+    res.status(500).json({ error: msg })
+  }
+}
+
 module.exports = {
   list,
   getOne,
   create,
   update,
   remove,
-  stats
+  stats,
+  fragranceLookup,
 }
