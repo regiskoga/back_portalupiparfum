@@ -30,6 +30,7 @@ const priceListsRoutes   = require('./routes/priceLists')
 const packagingTypesRoutes  = require('./routes/packagingTypes')
 const volumeDiscountsRoutes = require('./routes/volumeDiscounts')
 const macerationRoutes      = require('./routes/maceration')
+const catalogRoutes         = require('./routes/catalog')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
@@ -95,8 +96,9 @@ console.log('🔍 userPermissionsRoutes:', typeof userPermissionsRoutes)
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 try {
-  // Autenticação (rotas públicas)
-  app.use('/api/auth',      authRoutes)
+  // Rotas públicas (sem autenticação)
+  app.use('/api/auth',          authRoutes)
+  app.use('/api/public/catalog', catalogRoutes)
   
   // Rotas protegidas
   app.use('/api/users',     usersRoutes)
