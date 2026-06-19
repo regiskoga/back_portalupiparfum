@@ -1,6 +1,10 @@
 const express = require('express')
 const router = express.Router()
 const controller = require('../controllers/migrationController')
+const { authenticate, authorize } = require('../middleware/auth')
+
+router.use(authenticate)
+router.use(authorize('ADM'))
 
 // ─── Criação Direta das Tabelas ───────────────────────────────────────────────
 router.post('/create-permissions', controller.createPermissionsTables)

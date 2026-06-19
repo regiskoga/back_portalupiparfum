@@ -76,9 +76,6 @@ exports.getById = async (req, res) => {
  */
 exports.create = async (req, res) => {
   try {
-    console.log('📝 Iniciando criação de usuário...')
-    console.log('📝 Body recebido:', JSON.stringify(req.body, null, 2))
-    
     const { name, email, password, profile } = req.body
     
     // Validar campos
