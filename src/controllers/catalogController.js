@@ -132,4 +132,84 @@ async function brands(req, res) {
   }
 }
 
-module.exports = { list, brands }
+// Cria pedido a partir do catálogo público (sem JWT)
+async function createOrder(req, res) {
+  try {
+    const { customer, items } = req.body
+
+    if (!customer?.name?.trim() || !customer?.phone?.trim()) {
+      return res.status(422).json({ error: 'Nome e telefone do cliente são obrigatórios' })
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(422).json({ error: 'Selecione ao menos um perfume' })
+    }
+
+    const phone = customer.phone.replace(/\D/g, '')
+
+    // Buscar ou criar cliente pelo telefone (normalizado)
+    let existingCustomer = await db('customers')
+      .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [phone])
+      .first()
+
+    if (!existingCustomer) {
+      ;[existingCustomer] = await db('customers')
+        .insert({
+          name:  customer.name.trim(),
+          phone: customer.phone.trim(),
+        })
+        .returning('*')
+    }
+
+    // Validar produtos — só aceita IDs existentes e com catalog_status
+    const productIds = [...new Set(items.map(i => parseInt(i.product_id)).filter(Boolean))]
+    const products = await db('products')
+      .whereIn('id', productIds)
+      .where('active', true)
+      .whereNotNull('catalog_status')
+      .select('id', 'project_name', 'sku')
+
+    if (products.length === 0) {
+      return res.status(422).json({ error: 'Nenhum produto válido encontrado' })
+    }
+
+    const productMap = Object.fromEntries(products.map(p => [p.id, p]))
+
+    // Criar pedido em transação
+    const result = await db.transaction(async trx => {
+      const [order] = await trx('orders')
+        .insert({
+          customer_id:  existingCustomer.id,
+          code:         `ORD-${Date.now()}`,
+          status:       'Pending',
+          channel:      'WhatsApp',
+          from_catalog: true,
+          discount:     0,
+          shipping:     0,
+          notes:        'Pedido recebido via catálogo público',
+        })
+        .returning('*')
+
+      const orderItems = products.map(p => ({
+        order_id:     order.id,
+        product_id:   p.id,
+        product_name: p.project_name,
+        product_ref:  p.sku || '',
+        volume_ml:    null,
+        quantity:     1,
+        unit_price:   0,
+        item_discount: 0,
+      }))
+
+      await trx('order_items').insert(orderItems)
+
+      return { order_id: order.id, order_code: order.code, customer_id: existingCustomer.id }
+    })
+
+    res.status(201).json(result)
+  } catch (error) {
+    console.error('[catalog] createOrder error:', error)
+    res.status(500).json({ error: 'Erro ao registrar pedido' })
+  }
+}
+
+module.exports = { list, brands, createOrder }
