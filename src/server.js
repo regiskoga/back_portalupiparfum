@@ -31,6 +31,7 @@ const packagingTypesRoutes  = require('./routes/packagingTypes')
 const volumeDiscountsRoutes = require('./routes/volumeDiscounts')
 const macerationRoutes      = require('./routes/maceration')
 const catalogRoutes         = require('./routes/catalog')
+const importRoutes          = require('./routes/import')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
@@ -128,6 +129,7 @@ try {
   app.use('/api/packaging-types',  packagingTypesRoutes)
   app.use('/api/volume-discounts', volumeDiscountsRoutes)
   app.use('/api/maceration',       macerationRoutes)
+  app.use('/api/import',           importRoutes)
 
   console.log('✅ Todas as rotas carregadas com sucesso')
 } catch (routeError) {
