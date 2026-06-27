@@ -638,19 +638,33 @@ function parseWorkbook (buffer) {
   return out
 }
 
-async function processAll (parsed, dryRun) {
+// Mapa aba → função processadora (com opts quando necessário)
+const SHEET_PROCESSORS = {
+  'Fornecedores':   { fn: processFornecedores },
+  'Projetos':       { fn: processProjetos },
+  'Frascos':        { fn: processSupply, opts: { type: 'Bottle', unit: 'unidade' } },
+  'Essencias':      { fn: processSupply, opts: { type: 'Essence', unit: 'ml' } },
+  'Outros Insumos': { fn: processSupply, opts: { type: null } },
+  'Formulas':       { fn: processFormulas },
+  'Lotes':          { fn: processLotes },
+  'Envases':        { fn: processEnvases },
+  'Clientes':       { fn: processClientes }
+}
+
+// Processa todas as abas ou apenas uma (se sheetName for fornecido)
+async function processAll (parsed, dryRun, sheetName = null) {
   supplierCache.clear()
   const result = {}
+  const sheetsToProcess = sheetName ? [sheetName] : Object.keys(SHEET_PROCESSORS)
   await db.transaction(async (trx) => {
-    result['Fornecedores']   = await processFornecedores(trx, parsed['Fornecedores'] || [], dryRun)
-    result['Projetos']       = await processProjetos(trx, parsed['Projetos'] || [], dryRun)
-    result['Frascos']        = await processSupply(trx, parsed['Frascos'] || [], dryRun, { type: 'Bottle', unit: 'unidade' })
-    result['Essencias']      = await processSupply(trx, parsed['Essencias'] || [], dryRun, { type: 'Essence', unit: 'ml' })
-    result['Outros Insumos'] = await processSupply(trx, parsed['Outros Insumos'] || [], dryRun, { type: null })
-    result['Formulas']       = await processFormulas(trx, parsed['Formulas'] || [], dryRun)
-    result['Lotes']          = await processLotes(trx, parsed['Lotes'] || [], dryRun)
-    result['Envases']        = await processEnvases(trx, parsed['Envases'] || [], dryRun)
-    result['Clientes']       = await processClientes(trx, parsed['Clientes'] || [], dryRun)
+    for (const s of sheetsToProcess) {
+      const cfg = SHEET_PROCESSORS[s]
+      if (!cfg) continue
+      const rows = parsed[s] || []
+      result[s] = cfg.opts
+        ? await cfg.fn(trx, rows, dryRun, cfg.opts)
+        : await cfg.fn(trx, rows, dryRun)
+    }
     if (dryRun) throw new Error('__DRY_RUN_ROLLBACK__')
   }).catch(err => {
     if (err.message !== '__DRY_RUN_ROLLBACK__') throw err
@@ -661,21 +675,34 @@ async function processAll (parsed, dryRun) {
 // ══════════════════════════════════════════════════════════════════════════════
 // ENDPOINTS
 // ══════════════════════════════════════════════════════════════════════════════
+function buildTemplateBuffer (only = null) {
+  const wb = xlsx.utils.book_new()
+  const sheets = only ? [only] : Object.keys(TEMPLATE)
+  for (const sheetName of sheets) {
+    const def = TEMPLATE[sheetName]
+    if (!def) continue
+    const rows = [[def.title], def.headers, ...def.example]
+    const ws = xlsx.utils.aoa_to_sheet(rows)
+    ws['!cols'] = def.headers.map(() => ({ wch: 24 }))
+    ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: def.headers.length - 1 } }]
+    xlsx.utils.book_append_sheet(wb, ws, sheetName)
+  }
+  return xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' })
+}
+
 async function generateTemplate (req, res) {
   try {
-    const wb = xlsx.utils.book_new()
-    for (const [sheetName, def] of Object.entries(TEMPLATE)) {
-      // Linha 1: título descritivo  · Linha 2: cabeçalhos  · Linhas 3+: exemplos
-      const rows = [[def.title], def.headers, ...def.example]
-      const ws = xlsx.utils.aoa_to_sheet(rows)
-      ws['!cols'] = def.headers.map(() => ({ wch: 24 }))
-      ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: def.headers.length - 1 } }]
-      xlsx.utils.book_append_sheet(wb, ws, sheetName)
+    const sheet = req.query.sheet || null
+    if (sheet && !TEMPLATE[sheet]) {
+      return res.status(400).json({ error: `Aba "${sheet}" desconhecida` })
     }
-    const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' })
+    const buf = buildTemplateBuffer(sheet)
+    const fileName = sheet
+      ? `template_${sheet.replace(/\s+/g, '_').toLowerCase()}.xlsx`
+      : 'template_importacao_perfumaria.xlsx'
     res.set({
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': 'attachment; filename="template_importacao_perfumaria.xlsx"'
+      'Content-Disposition': `attachment; filename="${fileName}"`
     })
     res.send(buf)
   } catch (e) {
@@ -686,8 +713,12 @@ async function generateTemplate (req, res) {
 async function preview (req, res) {
   try {
     if (!req.file) return res.status(400).json({ error: 'Arquivo .xlsx não enviado' })
+    const sheet = req.query.sheet || null
+    if (sheet && !TEMPLATE[sheet]) {
+      return res.status(400).json({ error: `Aba "${sheet}" desconhecida` })
+    }
     const parsed = parseWorkbook(req.file.buffer)
-    const result = await processAll(parsed, true)
+    const result = await processAll(parsed, true, sheet)
     res.json({ dryRun: true, result })
   } catch (e) {
     res.status(400).json({ error: e.message })
@@ -697,9 +728,12 @@ async function preview (req, res) {
 async function commit (req, res) {
   try {
     if (!req.file) return res.status(400).json({ error: 'Arquivo .xlsx não enviado' })
+    const sheet = req.query.sheet || null
+    if (sheet && !TEMPLATE[sheet]) {
+      return res.status(400).json({ error: `Aba "${sheet}" desconhecida` })
+    }
     const parsed = parseWorkbook(req.file.buffer)
-    const validation = await processAll(parsed, true)
-    // Apenas erros "duros" bloqueiam (obrigatórios). Warnings (links opcionais) deixam passar.
+    const validation = await processAll(parsed, true, sheet)
     const hardErrors = Object.values(validation).reduce((s, v) =>
       s + v.errors.filter(e => /obrigatóri|inválid/i.test(e.msg)).length, 0)
     if (hardErrors > 0) {
@@ -708,7 +742,7 @@ async function commit (req, res) {
         result: validation
       })
     }
-    const result = await processAll(parsed, false)
+    const result = await processAll(parsed, false, sheet)
     res.json({ dryRun: false, result })
   } catch (e) {
     res.status(400).json({ error: e.message })
