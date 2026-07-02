@@ -721,6 +721,7 @@ async function preview (req, res) {
     const result = await processAll(parsed, true, sheet)
     res.json({ dryRun: true, result })
   } catch (e) {
+    console.error('❌ IMPORT PREVIEW ERROR', { sheet: req.query.sheet, message: e.message, stack: e.stack })
     res.status(400).json({ error: e.message })
   }
 }
@@ -745,6 +746,7 @@ async function commit (req, res) {
     const result = await processAll(parsed, false, sheet)
     res.json({ dryRun: false, result })
   } catch (e) {
+    console.error('❌ IMPORT COMMIT ERROR', { sheet: req.query.sheet, message: e.message, stack: e.stack })
     res.status(400).json({ error: e.message })
   }
 }
