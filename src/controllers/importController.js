@@ -210,6 +210,24 @@ async function ensureSupplier (trx, name) {
   return s
 }
 
+// Ensure formula existe — cria stub minimal quando referenciada mas ainda não cadastrada
+async function ensureFormula (trx, name) {
+  if (!name) return null
+  let f = await trx('formulas').where('name', name).first()
+  if (f) return f
+  const [inserted] = await trx('formulas').insert({
+    name,
+    product_id: null,
+    description: 'Auto-criada pela importação — complete os detalhes na tela de Fórmulas',
+    essence_percentage: 0,
+    total_percentage: 100,
+    active: true,
+    validated: false
+  }).returning('id')
+  const id = typeof inserted === 'object' ? inserted.id : inserted
+  return { id, name, product_id: null }
+}
+
 async function findProduct (trx, { sku, commercialName, projectName }) {
   if (sku) {
     const p = await trx('products').where('sku', sku).first()
@@ -443,12 +461,21 @@ async function processLotes (trx, rows, dryRun) {
     const volTotal = toNumber(getCol(r, 'Volume Total (ml)'))
     if (volTotal == null || volTotal <= 0) { errors.push({ row: r._row, msg: 'Volume Total (ml) inválido' }); continue }
 
-    // Fórmula é OBRIGATÓRIA na lógica do sistema (NOT NULL)
-    // Fazer o lookup MESMO em dryRun pra que o preview mostre o número real.
+    // Fórmula é OBRIGATÓRIA no schema (NOT NULL). Se o nome for informado
+    // mas a fórmula ainda não existir, cria stub automaticamente — o usuário
+    // completa os detalhes depois na tela de Fórmulas.
     const formulaNome = toString(getCol(r, 'Fórmula', 'Formula'))
-    if (!formulaNome) { errors.push({ row: r._row, msg: 'Fórmula obrigatória (sistema exige formula_id)' }); continue }
-    const formula = await trx('formulas').where('name', formulaNome).first()
-    if (!formula) { errors.push({ row: r._row, msg: `Fórmula "${formulaNome}" inválida — não encontrada; cadastre na aba Formulas primeiro` }); continue }
+    if (!formulaNome) { errors.push({ row: r._row, msg: 'Fórmula obrigatória (informe o nome — cria stub se não existir)' }); continue }
+    let formula = await trx('formulas').where('name', formulaNome).first()
+    if (!formula) {
+      if (dryRun) {
+        // No preview, apenas indica que a fórmula será criada
+        errors.push({ row: r._row, msg: `Fórmula "${formulaNome}" será criada automaticamente (complete depois na tela de Fórmulas)` })
+        formula = { id: 0, product_id: null }
+      } else {
+        formula = await ensureFormula(trx, formulaNome)
+      }
+    }
 
     // Projeto: opcional, busca por nome
     const projetoNome = toString(getCol(r, 'Projeto'))
