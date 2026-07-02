@@ -261,12 +261,18 @@ const VALID_BOTTLING_TYPES = ['normal', 'brinde']
 
 async function processFornecedores (trx, rows, dryRun) {
   const errors = []; let ok = 0
+  let seq = 0
   for (const r of rows) {
-    const nome = toString(getCol(r, 'Nome'))
-    if (!nome) { errors.push({ row: r._row, msg: 'Nome obrigatório' }); continue }
+    let nome = toString(getCol(r, 'Nome'))
+    if (!nome) {
+      seq++
+      nome = `Fornecedor sem nome ${seq}`
+      errors.push({ row: r._row, msg: `Nome em branco — usando "${nome}", edite depois` })
+    }
     let tipo = toString(getCol(r, 'Tipo'))
     if (tipo && !VALID_SUPPLIER_TYPES.includes(tipo)) {
-      errors.push({ row: r._row, msg: `Tipo "${tipo}" inválido. Use: ${VALID_SUPPLIER_TYPES.join(', ')}` }); continue
+      errors.push({ row: r._row, msg: `Tipo "${tipo}" desconhecido — deixado em branco (edite depois)` })
+      tipo = ''
     }
     if (dryRun) { ok++; continue }
     const data = {
@@ -295,9 +301,14 @@ async function processFornecedores (trx, rows, dryRun) {
 
 async function processProjetos (trx, rows, dryRun) {
   const errors = []; let ok = 0
+  let seq = 0
   for (const r of rows) {
-    const nome = toString(getCol(r, 'Nome do Projeto'))
-    if (!nome) { errors.push({ row: r._row, msg: 'Nome do Projeto obrigatório' }); continue }
+    let nome = toString(getCol(r, 'Nome do Projeto'))
+    if (!nome) {
+      seq++
+      nome = `Projeto sem nome ${seq}`
+      errors.push({ row: r._row, msg: `Nome do Projeto em branco — usando "${nome}", edite depois` })
+    }
     if (dryRun) { ok++; continue }
     const sku = toString(getCol(r, 'SKU')) || null
     const data = {
@@ -328,29 +339,41 @@ async function processProjetos (trx, rows, dryRun) {
 // Genérico para Frascos / Essencias / Outros Insumos
 async function processSupply (trx, rows, dryRun, opts) {
   const errors = []; let ok = 0
+  let seq = 0
   for (const r of rows) {
-    const nome = toString(getCol(r, 'Nome'))
-    if (!nome) { errors.push({ row: r._row, msg: 'Nome obrigatório' }); continue }
-    const fornNome = toString(getCol(r, 'Fornecedor'))
-    if (!fornNome) { errors.push({ row: r._row, msg: 'Fornecedor obrigatório' }); continue }
-
-    // Quantidade pode vir de "Quantidade Comprada", "Qtd Comprada (ml)" ou "Saldo Disponível"
-    const qtd = toNumber(getCol(r, 'Quantidade Comprada', 'Qtd Comprada (ml)'))
-    const saldo = toNumber(getCol(r, 'Saldo Disponível', 'Saldo Disponivel', 'Saldo Disponível (ml)', 'Saldo Disponivel (ml)'))
-    const qtdComprada = qtd != null ? qtd : saldo
-    if (qtdComprada == null || qtdComprada <= 0) {
-      errors.push({ row: r._row, msg: 'Quantidade Comprada ou Saldo Disponível inválido' }); continue
+    let nome = toString(getCol(r, 'Nome'))
+    if (!nome) {
+      seq++
+      nome = `Insumo sem nome ${seq}`
+      errors.push({ row: r._row, msg: `Nome em branco — usando "${nome}", edite depois` })
+    }
+    let fornNome = toString(getCol(r, 'Fornecedor'))
+    if (!fornNome) {
+      fornNome = 'Fornecedor sem nome (auto)'
+      errors.push({ row: r._row, msg: `Fornecedor em branco — usando "${fornNome}" (auto-criado)` })
     }
 
-    const valor = toNumber(getCol(r, 'Total Pago (R$)', 'Total Pago'))
-    if (valor == null || valor < 0) { errors.push({ row: r._row, msg: 'Total Pago inválido' }); continue }
+    const qtd = toNumber(getCol(r, 'Quantidade Comprada', 'Qtd Comprada (ml)'))
+    const saldo = toNumber(getCol(r, 'Saldo Disponível', 'Saldo Disponivel', 'Saldo Disponível (ml)', 'Saldo Disponivel (ml)'))
+    let qtdComprada = qtd != null ? qtd : saldo
+    if (qtdComprada == null || qtdComprada <= 0) {
+      qtdComprada = 1
+      errors.push({ row: r._row, msg: 'Quantidade em branco — usando 1 como placeholder' })
+    }
+
+    let valor = toNumber(getCol(r, 'Total Pago (R$)', 'Total Pago'))
+    if (valor == null || valor < 0) {
+      valor = 0
+      errors.push({ row: r._row, msg: 'Total Pago em branco — usando 0' })
+    }
 
     // Tipo: para "Outros Insumos", lê da coluna Tipo
     let tipo = opts.type
     if (!tipo) {
       tipo = toString(getCol(r, 'Tipo'))
       if (!tipo || !VALID_SUPPLY_TYPES.includes(tipo)) {
-        errors.push({ row: r._row, msg: `Tipo inválido. Use: ${VALID_SUPPLY_TYPES.join(', ')}` }); continue
+        errors.push({ row: r._row, msg: `Tipo em branco/desconhecido — usando "Chemical" como placeholder` })
+        tipo = 'Chemical'
       }
     }
 
@@ -393,9 +416,14 @@ async function processSupply (trx, rows, dryRun, opts) {
 
 async function processFormulas (trx, rows, dryRun) {
   const errors = []; let ok = 0
+  let seq = 0
   for (const r of rows) {
-    const nome = toString(getCol(r, 'Nome'))
-    if (!nome) { errors.push({ row: r._row, msg: 'Nome obrigatório' }); continue }
+    let nome = toString(getCol(r, 'Nome'))
+    if (!nome) {
+      seq++
+      nome = `Fórmula sem nome ${seq}`
+      errors.push({ row: r._row, msg: `Nome em branco — usando "${nome}", edite depois` })
+    }
     const essPct = toNumber(getCol(r, '% Essência', 'Essencia')) ?? 0
 
     if (dryRun) { ok++; continue }
@@ -453,13 +481,26 @@ async function processFormulas (trx, rows, dryRun) {
 
 async function processLotes (trx, rows, dryRun) {
   const errors = []; let ok = 0
+  let placeholderSeq = 0
   for (const r of rows) {
-    const codigo = toString(getCol(r, 'Código do Lote', 'Codigo do Lote'))
-    if (!codigo) { errors.push({ row: r._row, msg: 'Código do Lote obrigatório' }); continue }
-    const dataProd = parseExcelDate(getCol(r, 'Data de Produção', 'Data de Producao'))
-    if (!dataProd) { errors.push({ row: r._row, msg: 'Data de Produção inválida' }); continue }
-    const volTotal = toNumber(getCol(r, 'Volume Total (ml)'))
-    if (volTotal == null || volTotal <= 0) { errors.push({ row: r._row, msg: 'Volume Total (ml) inválido' }); continue }
+    // Campos NOT NULL do schema — se em branco na planilha, usa placeholders
+    // e apenas registra warning (sem bloquear o import).
+    let codigo = toString(getCol(r, 'Código do Lote', 'Codigo do Lote'))
+    if (!codigo) {
+      placeholderSeq++
+      codigo = `LOTE-IMPORT-${Date.now()}-${placeholderSeq}`
+      errors.push({ row: r._row, msg: `Código do Lote em branco — gerado automaticamente "${codigo}", edite depois se quiser` })
+    }
+    let dataProd = parseExcelDate(getCol(r, 'Data de Produção', 'Data de Producao'))
+    if (!dataProd) {
+      dataProd = new Date().toISOString().slice(0, 10)
+      errors.push({ row: r._row, msg: `Data de Produção em branco — usando hoje (${dataProd}), edite depois se quiser` })
+    }
+    let volTotal = toNumber(getCol(r, 'Volume Total (ml)'))
+    if (volTotal == null || volTotal <= 0) {
+      volTotal = 1
+      errors.push({ row: r._row, msg: 'Volume Total (ml) em branco — usando 1 ml como placeholder, edite depois' })
+    }
 
     // Fórmula é NOT NULL no schema, mas queremos permitir Lote sem nome
     // de fórmula na planilha. Solução: usar um placeholder "Sem fórmula
@@ -550,13 +591,24 @@ async function processLotes (trx, rows, dryRun) {
 
 async function processEnvases (trx, rows, dryRun) {
   const errors = []; let ok = 0
+  let seq = 0
   for (const r of rows) {
-    const codigo = toString(getCol(r, 'Código'))
-    if (!codigo) { errors.push({ row: r._row, msg: 'Código obrigatório' }); continue }
-    const dataEnv = parseExcelDate(getCol(r, 'Data do Envase'))
-    if (!dataEnv) { errors.push({ row: r._row, msg: 'Data do Envase inválida' }); continue }
-    const volume = toNumber(getCol(r, 'Volume (ml)'))
-    if (volume == null || volume <= 0) { errors.push({ row: r._row, msg: 'Volume (ml) inválido' }); continue }
+    let codigo = toString(getCol(r, 'Código'))
+    if (!codigo) {
+      seq++
+      codigo = `ENV-IMPORT-${Date.now()}-${seq}`
+      errors.push({ row: r._row, msg: `Código em branco — gerado automaticamente "${codigo}"` })
+    }
+    let dataEnv = parseExcelDate(getCol(r, 'Data do Envase'))
+    if (!dataEnv) {
+      dataEnv = new Date().toISOString().slice(0, 10)
+      errors.push({ row: r._row, msg: `Data do Envase em branco — usando hoje (${dataEnv})` })
+    }
+    let volume = toNumber(getCol(r, 'Volume (ml)'))
+    if (volume == null || volume <= 0) {
+      volume = 1
+      errors.push({ row: r._row, msg: 'Volume (ml) em branco — usando 1 como placeholder' })
+    }
     const qtdProd = toNumber(getCol(r, 'Qtd Produzida')) ?? 1
 
     if (dryRun) { ok++; continue }
@@ -635,9 +687,14 @@ async function processEnvases (trx, rows, dryRun) {
 
 async function processClientes (trx, rows, dryRun) {
   const errors = []; let ok = 0
+  let seq = 0
   for (const r of rows) {
-    const nome = toString(getCol(r, 'Nome'))
-    if (!nome) { errors.push({ row: r._row, msg: 'Nome obrigatório' }); continue }
+    let nome = toString(getCol(r, 'Nome'))
+    if (!nome) {
+      seq++
+      nome = `Cliente sem nome ${seq}`
+      errors.push({ row: r._row, msg: `Nome em branco — usando "${nome}", edite depois` })
+    }
     if (dryRun) { ok++; continue }
     const data = {
       name: nome,
