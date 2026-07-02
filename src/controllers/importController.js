@@ -463,7 +463,11 @@ async function processLotes (trx, rows, dryRun) {
     if (!VALID_BATCH_STATUS.includes(status)) status = 'Pronto para envase'
 
     const mlDisp = toNumber(getCol(r, 'ml Disponível', 'ml Disponivel'))
-    const remaining = mlDisp != null ? Math.min(mlDisp, volTotal) : volTotal
+    // Check constraint no DB: remaining_ml >= 0 e remaining_ml <= quantity_ml
+    // Clamp o valor pra respeitar ambos os limites.
+    const remaining = mlDisp != null
+      ? Math.max(0, Math.min(mlDisp, volTotal))
+      : volTotal
 
     const totalCost = toNumber(getCol(r, 'Custo Total (R$)', 'Custo Total')) ?? 0
 
