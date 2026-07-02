@@ -443,13 +443,12 @@ async function processLotes (trx, rows, dryRun) {
     const volTotal = toNumber(getCol(r, 'Volume Total (ml)'))
     if (volTotal == null || volTotal <= 0) { errors.push({ row: r._row, msg: 'Volume Total (ml) inválido' }); continue }
 
-    if (dryRun) { ok++; continue }
-
     // Fórmula é OBRIGATÓRIA na lógica do sistema (NOT NULL)
+    // Fazer o lookup MESMO em dryRun pra que o preview mostre o número real.
     const formulaNome = toString(getCol(r, 'Fórmula', 'Formula'))
     if (!formulaNome) { errors.push({ row: r._row, msg: 'Fórmula obrigatória (sistema exige formula_id)' }); continue }
     const formula = await trx('formulas').where('name', formulaNome).first()
-    if (!formula) { errors.push({ row: r._row, msg: `Fórmula "${formulaNome}" não encontrada — cadastre na aba Formulas primeiro` }); continue }
+    if (!formula) { errors.push({ row: r._row, msg: `Fórmula "${formulaNome}" inválida — não encontrada; cadastre na aba Formulas primeiro` }); continue }
 
     // Projeto: opcional, busca por nome
     const projetoNome = toString(getCol(r, 'Projeto'))
@@ -458,6 +457,8 @@ async function processLotes (trx, rows, dryRun) {
       const p = await findProduct(trx, { commercialName: projetoNome, projectName: projetoNome })
       if (p) productId = p.id
     }
+
+    if (dryRun) { ok++; continue }
 
     let status = toString(getCol(r, 'Status')) || 'Pronto para envase'
     if (!VALID_BATCH_STATUS.includes(status)) status = 'Pronto para envase'
