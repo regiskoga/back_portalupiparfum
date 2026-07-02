@@ -482,7 +482,17 @@ async function processFormulas (trx, rows, dryRun) {
 async function processLotes (trx, rows, dryRun) {
   const errors = []; let ok = 0
   let placeholderSeq = 0
+  const codesSeen = new Set()
   console.log(`🔍 processLotes: recebeu ${rows.length} linha(s), dryRun=${dryRun}`)
+  if (rows.length > 0) {
+    const sample = rows.slice(0, 5).map(r => ({
+      _row: r._row,
+      codigo: getCol(r, 'Código do Lote', 'Codigo do Lote'),
+      formula: getCol(r, 'Fórmula', 'Formula'),
+      volume: getCol(r, 'Volume Total (ml)')
+    }))
+    console.log(`   Amostra 5 primeiras linhas:`, JSON.stringify(sample))
+  }
   for (const r of rows) {
     // Campos NOT NULL do schema — se em branco na planilha, usa placeholders
     // e apenas registra warning (sem bloquear o import).
@@ -492,6 +502,7 @@ async function processLotes (trx, rows, dryRun) {
       codigo = `LOTE-IMPORT-${Date.now()}-${placeholderSeq}`
       errors.push({ row: r._row, msg: `Código do Lote em branco — gerado automaticamente "${codigo}", edite depois se quiser` })
     }
+    codesSeen.add(codigo)
     let dataProd = parseExcelDate(getCol(r, 'Data de Produção', 'Data de Producao'))
     if (!dataProd) {
       dataProd = new Date().toISOString().slice(0, 10)
@@ -587,7 +598,11 @@ async function processLotes (trx, rows, dryRun) {
     }
     ok++
   }
-  console.log(`✅ processLotes: OK=${ok}, warnings=${errors.length}, dryRun=${dryRun}`)
+  console.log(`✅ processLotes: OK=${ok}, warnings=${errors.length}, códigos únicos=${codesSeen.size}, dryRun=${dryRun}`)
+  if (!dryRun && codesSeen.size < ok) {
+    console.log(`   ⚠️  ATENÇÃO: ${ok} linhas processadas mas só ${codesSeen.size} códigos únicos — o upsert consolidou por batch_code.`)
+    console.log(`   Códigos únicos (até 10):`, [...codesSeen].slice(0, 10).join(', '))
+  }
   if (errors.length > 0 && !dryRun) {
     console.log(`   Warnings sample:`, JSON.stringify(errors.slice(0, 5)))
   }
