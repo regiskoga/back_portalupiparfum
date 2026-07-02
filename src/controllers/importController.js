@@ -482,6 +482,7 @@ async function processFormulas (trx, rows, dryRun) {
 async function processLotes (trx, rows, dryRun) {
   const errors = []; let ok = 0
   let placeholderSeq = 0
+  console.log(`🔍 processLotes: recebeu ${rows.length} linha(s), dryRun=${dryRun}`)
   for (const r of rows) {
     // Campos NOT NULL do schema — se em branco na planilha, usa placeholders
     // e apenas registra warning (sem bloquear o import).
@@ -585,6 +586,10 @@ async function processLotes (trx, rows, dryRun) {
       }
     }
     ok++
+  }
+  console.log(`✅ processLotes: OK=${ok}, warnings=${errors.length}, dryRun=${dryRun}`)
+  if (errors.length > 0 && !dryRun) {
+    console.log(`   Warnings sample:`, JSON.stringify(errors.slice(0, 5)))
   }
   return { ok, errors }
 }
@@ -823,10 +828,15 @@ async function commit (req, res) {
     if (sheet && !TEMPLATE[sheet]) {
       return res.status(400).json({ error: `Aba "${sheet}" desconhecida` })
     }
+    console.log(`▶️  COMMIT sheet=${sheet}`)
     const parsed = parseWorkbook(req.file.buffer)
+    for (const [name, rows] of Object.entries(parsed)) {
+      if (!sheet || name === sheet) console.log(`   parsed[${name}] = ${rows.length} linha(s)`)
+    }
     const validation = await processAll(parsed, true, sheet)
     const hardErrors = Object.values(validation).reduce((s, v) =>
       s + v.errors.filter(e => /obrigatóri|inválid/i.test(e.msg)).length, 0)
+    console.log(`   validation hardErrors=${hardErrors}`)
     if (hardErrors > 0) {
       return res.status(400).json({
         error: 'Erros bloqueantes na planilha. Corrija antes de confirmar.',
@@ -834,6 +844,7 @@ async function commit (req, res) {
       })
     }
     const result = await processAll(parsed, false, sheet)
+    console.log(`✅ COMMIT done sheet=${sheet}, result=${JSON.stringify(Object.fromEntries(Object.entries(result).map(([k,v]) => [k, { ok: v.ok, err: v.errors.length }])))}`)
     res.json({ dryRun: false, result })
   } catch (e) {
     console.error('❌ IMPORT COMMIT ERROR', { sheet: req.query.sheet, message: e.message, stack: e.stack })
