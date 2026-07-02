@@ -502,7 +502,6 @@ async function processLotes (trx, rows, dryRun) {
       codigo = `LOTE-IMPORT-${Date.now()}-${placeholderSeq}`
       errors.push({ row: r._row, msg: `Código do Lote em branco — gerado automaticamente "${codigo}", edite depois se quiser` })
     }
-    codesSeen.add(codigo)
     let dataProd = parseExcelDate(getCol(r, 'Data de Produção', 'Data de Producao'))
     if (!dataProd) {
       dataProd = new Date().toISOString().slice(0, 10)
@@ -534,10 +533,28 @@ async function processLotes (trx, rows, dryRun) {
     // Projeto: opcional, busca por nome
     const projetoNome = toString(getCol(r, 'Projeto'))
     let productId = formula.product_id
+    let productLabel = ''
     if (projetoNome) {
       const p = await findProduct(trx, { commercialName: projetoNome, projectName: projetoNome })
-      if (p) productId = p.id
+      if (p) {
+        productId = p.id
+        productLabel = p.commercial_name || p.project_name || projetoNome
+      } else {
+        productLabel = projetoNome
+      }
     }
+
+    // Como o mesmo "Código do Lote" (Ex: LOTE-00001) se repete pra cada projeto,
+    // combinamos código + projeto pra formar o batch_code UNIQUE global.
+    // Se não houver projeto, usa o número da linha como sufixo (idempotente).
+    const originalCodigo = codigo
+    if (productLabel) {
+      codigo = `${originalCodigo} - ${productLabel}`
+    } else if (originalCodigo && !codigo.includes('LOTE-IMPORT-')) {
+      // Só sufixa se não for placeholder auto-gerado (que já é único)
+      codigo = `${originalCodigo} - linha ${r._row}`
+    }
+    codesSeen.add(codigo)
 
     if (dryRun) { ok++; continue }
 
