@@ -493,6 +493,13 @@ async function processLotes (trx, rows, dryRun) {
     }))
     console.log(`   Amostra 5 primeiras linhas:`, JSON.stringify(sample))
   }
+  // Pré-scan: conta ocorrências de cada código na planilha.
+  // Só faz combinação código+projeto quando o código se repete.
+  const codeCount = new Map()
+  for (const r of rows) {
+    const c = toString(getCol(r, 'Código do Lote', 'Codigo do Lote'))
+    if (c) codeCount.set(c, (codeCount.get(c) || 0) + 1)
+  }
   for (const r of rows) {
     // Campos NOT NULL do schema — se em branco na planilha, usa placeholders
     // e apenas registra warning (sem bloquear o import).
@@ -533,25 +540,16 @@ async function processLotes (trx, rows, dryRun) {
     // Projeto: opcional, busca por nome
     const projetoNome = toString(getCol(r, 'Projeto'))
     let productId = formula.product_id
-    let productLabel = ''
     if (projetoNome) {
       const p = await findProduct(trx, { commercialName: projetoNome, projectName: projetoNome })
-      if (p) {
-        productId = p.id
-        productLabel = p.commercial_name || p.project_name || projetoNome
-      } else {
-        productLabel = projetoNome
-      }
+      if (p) productId = p.id
     }
 
-    // Como o mesmo "Código do Lote" (Ex: LOTE-00001) se repete pra cada projeto,
-    // combinamos código + projeto pra formar o batch_code UNIQUE global.
-    // Se não houver projeto, usa o número da linha como sufixo (idempotente).
+    // Só desambiguamos com "- linha N" se o MESMO código aparecer >1x
+    // na planilha. Se cada linha já tem código único, mantém como está
+    // (usuário controla o batch_code diretamente).
     const originalCodigo = codigo
-    if (productLabel) {
-      codigo = `${originalCodigo} - ${productLabel}`
-    } else if (originalCodigo && !codigo.includes('LOTE-IMPORT-')) {
-      // Só sufixa se não for placeholder auto-gerado (que já é único)
+    if (originalCodigo && !codigo.includes('LOTE-IMPORT-') && codeCount.get(originalCodigo) > 1) {
       codigo = `${originalCodigo} - linha ${r._row}`
     }
     codesSeen.add(codigo)
