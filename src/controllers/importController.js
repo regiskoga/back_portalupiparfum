@@ -461,15 +461,16 @@ async function processLotes (trx, rows, dryRun) {
     const volTotal = toNumber(getCol(r, 'Volume Total (ml)'))
     if (volTotal == null || volTotal <= 0) { errors.push({ row: r._row, msg: 'Volume Total (ml) inválido' }); continue }
 
-    // Fórmula é OBRIGATÓRIA no schema (NOT NULL). Se o nome for informado
-    // mas a fórmula ainda não existir, cria stub automaticamente — o usuário
-    // completa os detalhes depois na tela de Fórmulas.
-    const formulaNome = toString(getCol(r, 'Fórmula', 'Formula'))
-    if (!formulaNome) { errors.push({ row: r._row, msg: 'Fórmula obrigatória (informe o nome — cria stub se não existir)' }); continue }
+    // Fórmula é NOT NULL no schema, mas queremos permitir Lote sem nome
+    // de fórmula na planilha. Solução: usar um placeholder "Sem fórmula
+    // (importação)" que serve de destino pra todos os lotes sem vínculo.
+    // Se o nome estiver informado mas ainda não existir, cria stub com
+    // esse nome específico.
+    const PLACEHOLDER_FORMULA = 'Sem fórmula (importação)'
+    const formulaNome = toString(getCol(r, 'Fórmula', 'Formula')) || PLACEHOLDER_FORMULA
     let formula = await trx('formulas').where('name', formulaNome).first()
     if (!formula) {
       if (dryRun) {
-        // No preview, apenas indica que a fórmula será criada
         errors.push({ row: r._row, msg: `Fórmula "${formulaNome}" será criada automaticamente (complete depois na tela de Fórmulas)` })
         formula = { id: 0, product_id: null }
       } else {
