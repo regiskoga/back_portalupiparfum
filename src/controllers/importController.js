@@ -493,13 +493,6 @@ async function processLotes (trx, rows, dryRun) {
     }))
     console.log(`   Amostra 5 primeiras linhas:`, JSON.stringify(sample))
   }
-  // Pré-scan: conta ocorrências de cada código na planilha.
-  // Só faz combinação código+projeto quando o código se repete.
-  const codeCount = new Map()
-  for (const r of rows) {
-    const c = toString(getCol(r, 'Código do Lote', 'Codigo do Lote'))
-    if (c) codeCount.set(c, (codeCount.get(c) || 0) + 1)
-  }
   for (const r of rows) {
     // Campos NOT NULL do schema — se em branco na planilha, usa placeholders
     // e apenas registra warning (sem bloquear o import).
@@ -545,13 +538,8 @@ async function processLotes (trx, rows, dryRun) {
       if (p) productId = p.id
     }
 
-    // Só desambiguamos com "- linha N" se o MESMO código aparecer >1x
-    // na planilha. Se cada linha já tem código único, mantém como está
-    // (usuário controla o batch_code diretamente).
-    const originalCodigo = codigo
-    if (originalCodigo && !codigo.includes('LOTE-IMPORT-') && codeCount.get(originalCodigo) > 1) {
-      codigo = `${originalCodigo} - linha ${r._row}`
-    }
+    // batch_code sozinho não é mais unique — a chave é (batch_code, product_id).
+    // Preserva o código exato da planilha, sem concatenar/sufixar.
     codesSeen.add(codigo)
 
     if (dryRun) { ok++; continue }
@@ -584,7 +572,11 @@ async function processLotes (trx, rows, dryRun) {
       total_cost: totalCost,
       cost_per_ml: volTotal > 0 ? totalCost / volTotal : 0
     }
-    const existing = await trx('batches').where('batch_code', codigo).first()
+    // Upsert por chave composta (batch_code, product_id)
+    let existingQ = trx('batches').where('batch_code', codigo)
+    if (productId != null) existingQ = existingQ.where('product_id', productId)
+    else existingQ = existingQ.whereNull('product_id')
+    const existing = await existingQ.first()
     let batchId
     if (existing) {
       await trx('batches').where('id', existing.id).update(data)
@@ -654,7 +646,15 @@ async function processEnvases (trx, rows, dryRun) {
     const loteCod = toString(getCol(r, 'Lote'))
     let batchId = null
     if (loteCod) {
-      const b = await trx('batches').where('batch_code', loteCod).first()
+      // batch_code sozinho pode existir em N projetos — filtra pelo product_id
+      // do envase quando existir; fallback pra qualquer batch com esse código.
+      let bq = trx('batches').where('batch_code', loteCod)
+      if (product) bq = bq.where('product_id', product.id)
+      let b = await bq.orderBy('production_date', 'desc').first()
+      if (!b && product) {
+        // Se filtrando por produto não achou, tenta sem produto (fallback)
+        b = await trx('batches').where('batch_code', loteCod).orderBy('production_date', 'desc').first()
+      }
       if (b) batchId = b.id
       else errors.push({ row: r._row, msg: `Lote "${loteCod}" não encontrado — envase importado sem vínculo com lote` })
     }
