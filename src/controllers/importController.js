@@ -244,6 +244,47 @@ async function findProduct (trx, { sku, commercialName, projectName }) {
   return null
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// CASAMENTO TOLERANTE LOTE ↔ ENVASE
+// A coluna "Lote" da planilha de Envases nem sempre bate byte-a-byte com o
+// batch_code do lote: varia caixa/acento/espaço, ou vem como "CÓDIGO nome"
+// (código + nome do projeto grudados). Normalizamos e aceitamos prefixo.
+// ──────────────────────────────────────────────────────────────────────────────
+function normCode (s) {
+  return String(s ?? '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '') // remove acentos
+    .trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+// Pontuação do casamento entre alvo (envase) e candidato (batch_code), ambos
+// já normalizados. 0 = não casa. Maior = melhor. O separador considerado é o
+// espaço (nome do projeto grudado ao código), para não quebrar códigos com "-".
+function codeMatchScore (target, code) {
+  if (!target || !code) return 0
+  if (target === code) return 3                                  // igual
+  if (target.startsWith(code) && target[code.length] === ' ') return 2 // envase = "CÓDIGO nome"
+  if (code.startsWith(target) && code[target.length] === ' ') return 1 // batch  = "CÓDIGO nome"
+  return 0
+}
+
+// batches: [{ id, batch_code, product_id, production_date, _norm }]
+// Prefere match de código mais forte; empate → mesmo produto; empate → mais recente.
+function matchBatch (batches, loteCod, productId) {
+  const target = normCode(loteCod)
+  if (!target) return null
+  let best = null
+  for (const b of batches) {
+    const score = codeMatchScore(target, b._norm)
+    if (!score) continue
+    const rank = score + (productId != null && b.product_id === productId ? 0.5 : 0)
+    const newer = !best || rank > best.rank ||
+      (rank === best.rank &&
+        String(b.production_date || '') > String(best.b.production_date || ''))
+    if (newer) best = { b, rank }
+  }
+  return best ? best.b : null
+}
+
 async function findSupplyByName (trx, name, type) {
   if (!name) return null
   let q = trx('supplies').whereRaw('LOWER(name) = ?', name.toLowerCase())
@@ -616,9 +657,22 @@ async function processLotes (trx, rows, dryRun) {
   return { ok, errors }
 }
 
+// Normaliza a data de produção para 'YYYY-MM-DD' comparável como string.
+// Postgres pode devolver Date; SQLite devolve string — matchBatch desempata
+// por comparação lexicográfica, então o formato precisa ser uniforme.
+function isoDay (d) {
+  if (d == null || d === '') return ''
+  if (typeof d === 'string') return d.slice(0, 10)
+  try { return new Date(d).toISOString().slice(0, 10) } catch { return '' }
+}
+
 async function processEnvases (trx, rows, dryRun) {
   const errors = []; let ok = 0
   let seq = 0
+  // Carrega todos os lotes uma vez e pré-normaliza (código + data) para o
+  // casamento tolerante lote↔envase feito em memória por matchBatch().
+  const allBatches = (await trx('batches').select('id', 'batch_code', 'product_id', 'production_date'))
+    .map(b => ({ ...b, _norm: normCode(b.batch_code), production_date: isoDay(b.production_date) }))
   for (const r of rows) {
     let codigo = toString(getCol(r, 'Código'))
     if (!codigo) {
@@ -646,17 +700,20 @@ async function processEnvases (trx, rows, dryRun) {
     const loteCod = toString(getCol(r, 'Lote'))
     let batchId = null
     if (loteCod) {
-      // batch_code sozinho pode existir em N projetos — filtra pelo product_id
-      // do envase quando existir; fallback pra qualquer batch com esse código.
-      let bq = trx('batches').where('batch_code', loteCod)
-      if (product) bq = bq.where('product_id', product.id)
-      let b = await bq.orderBy('production_date', 'desc').first()
-      if (!b && product) {
-        // Se filtrando por produto não achou, tenta sem produto (fallback)
-        b = await trx('batches').where('batch_code', loteCod).orderBy('production_date', 'desc').first()
+      // Casamento tolerante: aceita divergência de caixa/acento/espaço e o
+      // formato "CÓDIGO nome" (código grudado ao nome do projeto). Desempata
+      // pelo product_id do envase e, por fim, pelo lote mais recente.
+      const b = matchBatch(allBatches, loteCod, product ? product.id : null)
+      if (b) {
+        batchId = b.id
+        // Vínculo por aproximação (prefixo/"CÓDIGO nome") cria uma ligação que
+        // antes não existia e mexe em estoque/committed_ml — deixa auditável.
+        if (normCode(loteCod) !== b._norm) {
+          errors.push({ row: r._row, msg: `Lote "${loteCod}" vinculado por APROXIMAÇÃO ao lote "${b.batch_code}" — confira` })
+        }
+      } else {
+        errors.push({ row: r._row, msg: `Lote "${loteCod}" não encontrado — envase importado sem vínculo com lote` })
       }
-      if (b) batchId = b.id
-      else errors.push({ row: r._row, msg: `Lote "${loteCod}" não encontrado — envase importado sem vínculo com lote` })
     }
 
     const frascoNome = toString(getCol(r, 'Frasco'))
