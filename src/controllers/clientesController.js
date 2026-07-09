@@ -5,7 +5,8 @@ async function customerWithStats (id) {
   const customer = await db('customers as c')
     .leftJoin('orders as o', 'o.customer_id', 'c.id')
     .select('c.*')
-    .count('o.id as total_orders')
+    // Resumo não conta pedidos cancelados (mantém consistência com total_spent)
+    .select(db.raw("COUNT(CASE WHEN o.status <> 'Cancelled' THEN o.id END) as total_orders"))
     .max('o.created_at as last_order')
     .where('c.id', id)
     .groupBy('c.id')
@@ -39,7 +40,8 @@ async function list (req, res) {
     let query = db('customers as c')
       .leftJoin('orders as o', 'o.customer_id', 'c.id')
       .select('c.*')
-      .count('o.id as total_orders')
+      // Resumo não conta pedidos cancelados (mantém consistência com total_spent)
+      .select(db.raw("COUNT(CASE WHEN o.status <> 'Cancelled' THEN o.id END) as total_orders"))
       .max('o.created_at as last_order')
       .groupBy('c.id')
 
@@ -361,6 +363,19 @@ async function updateOrder (req, res) {
       return res.status(404).json({ error: 'Order not found' })
     }
 
+    // Guarda cross-flow: pedidos criados em Vendas (itens com product_id, vínculos de
+    // envase e lógica de estoque) não podem ser editados por este drawer de registro
+    // manual — a substituição de itens apagaria product_id/volume_ml e quebraria vínculos.
+    const salesItem = await db('order_items')
+      .where({ order_id: req.params.orderId })
+      .whereNotNull('product_id')
+      .first()
+    if (salesItem) {
+      return res.status(409).json({
+        error: 'Este pedido foi criado na tela de Vendas e não pode ser editado aqui. Edite-o em Vendas para preservar estoque e vínculos de envase.'
+      })
+    }
+
     const { code, status, channel, discount, shipping, notes, items } = req.body
 
     await db.transaction(async (trx) => {
@@ -408,6 +423,18 @@ async function deleteOrder (req, res) {
 
     if (!order) {
       return res.status(404).json({ error: 'Order not found' })
+    }
+
+    // Guarda cross-flow: excluir aqui um pedido de Vendas não restauraria o estoque de
+    // envases (committed_ml/quantity_available) — só o fluxo de Vendas faz isso corretamente.
+    const salesItem = await db('order_items')
+      .where({ order_id: req.params.orderId })
+      .whereNotNull('product_id')
+      .first()
+    if (salesItem) {
+      return res.status(409).json({
+        error: 'Este pedido foi criado na tela de Vendas. Exclua-o em Vendas para restaurar corretamente o estoque.'
+      })
     }
 
     await db('orders').where({ id: req.params.orderId }).del()

@@ -48,6 +48,20 @@ async function list(req, res) {
         .select('oi.product_id', db.raw('COALESCE(SUM(GREATEST(0, oi.quantity - COALESCE(oib_sum.total_linked, 0))), 0) as committed_quantity'))
       const committedMap = Object.fromEntries(committed.map(r => [r.product_id, r.committed_quantity]))
       products.forEach(p => { p.committed_quantity = committedMap[p.id] || 0 })
+
+      // Total de ML em estoque = soma de remaining_ml de TODOS os lotes do projeto
+      // (exclui Finalizados, que já não têm saldo). Fonte única de verdade p/ a coluna
+      // "Estoque (ml)" na tela de projetos.
+      const mlRows = await db('batches')
+        .whereIn('product_id', productIds)
+        .whereNot('status', 'Finalizado')
+        .groupBy('product_id')
+        .select('product_id', db.raw('COALESCE(SUM(remaining_ml), 0) as total_ml'), db.raw('COUNT(*) as batch_count'))
+      const mlMap = Object.fromEntries(mlRows.map(r => [r.product_id, r]))
+      products.forEach(p => {
+        p.total_ml    = parseFloat(mlMap[p.id]?.total_ml || 0)
+        p.batch_count = parseInt(mlMap[p.id]?.batch_count || 0)
+      })
     }
 
     res.json(products)

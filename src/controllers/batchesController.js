@@ -66,7 +66,9 @@ async function list(req, res) {
         'b.*',
         'f.name as formula_name',
         'p.project_name',
-        'p.commercial_name'
+        'p.commercial_name',
+        'p.inspiration_brand',
+        'p.inspiration_name'
       )
       .orderBy('b.production_date', 'desc')
 
@@ -84,10 +86,17 @@ async function list(req, res) {
     }
 
     if (search) {
+      // Extrai o dígito de termos como "Lote 5" / "lote5" para casar com reduced_lot_number
+      const numericTerm = String(search).replace(/[^0-9]/g, '')
       query = query.where(function() {
         this.where('b.batch_code', 'ilike', `%${search}%`)
           .orWhere('p.project_name', 'ilike', `%${search}%`)
           .orWhere('p.commercial_name', 'ilike', `%${search}%`)
+          .orWhere('p.inspiration_brand', 'ilike', `%${search}%`)
+          .orWhere('p.inspiration_name', 'ilike', `%${search}%`)
+        if (numericTerm) {
+          this.orWhere('b.reduced_lot_number', parseInt(numericTerm))
+        }
       })
     }
 
@@ -122,7 +131,9 @@ async function getOne(req, res) {
         'f.description as formula_description',
         'f.essence_percentage',
         'p.project_name',
-        'p.commercial_name'
+        'p.commercial_name',
+        'p.inspiration_brand',
+        'p.inspiration_name'
       )
       .where('b.id', parseInt(req.params.id))
       .first()
