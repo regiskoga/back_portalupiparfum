@@ -794,6 +794,98 @@ async function stockSummary (req, res) {
   }
 }
 
+// ─── VÍNCULO LOTE↔ENVASE (reconciliação histórica, SEM abate) ─────────────────
+// Fase 2 do backfill: envases carregados em massa (03/07) só guardam product_ref
+// (SKU do produto), não o lote. Para produtos com >1 lote é impossível adivinhar
+// qual foi — o usuário escolhe na tela entre os lotes candidatos do MESMO produto.
+// IMPORTANTE: NÃO abate remaining_ml. O estoque carregado já reflete o envase
+// histórico; re-abater seria dupla contagem. Só o fluxo create() abate.
+
+// GET /api/bottlings/:id/candidate-batches
+// Lista os lotes do produto do envase (via products.sku = bottling.product_ref).
+async function getCandidateBatches (req, res) {
+  try {
+    const bottling = await db('bottlings').where('id', parseInt(req.params.id)).first()
+    if (!bottling) return res.status(404).json({ error: 'Envase não encontrado' })
+
+    if (!bottling.product_ref) {
+      return res.json({ product: null, reason: 'Envase sem SKU (product_ref) — defina o produto antes de vincular um lote.', suggested_ml: 0, candidates: [] })
+    }
+
+    const product = await db('products').where('sku', bottling.product_ref).first()
+    if (!product) {
+      return res.json({ product: null, reason: `Nenhum produto com SKU "${bottling.product_ref}".`, suggested_ml: 0, candidates: [] })
+    }
+
+    const linked = await db('bottling_batches').where('bottling_id', bottling.id).pluck('batch_id')
+
+    const batches = await db('batches as b')
+      .leftJoin('formulas as f', 'f.id', 'b.formula_id')
+      .where('b.product_id', product.id)
+      .select('b.id', 'b.batch_code', 'b.reduced_lot_number', 'b.production_date',
+              'b.remaining_ml', 'b.quantity_ml', 'b.cost_per_ml', 'b.status', 'f.name as formula_name')
+      .orderBy('b.production_date', 'asc')
+
+    res.json({
+      product: { id: product.id, sku: product.sku, commercial_name: product.commercial_name, project_name: product.project_name },
+      suggested_ml: parseFloat(bottling.volume_ml) * parseInt(bottling.quantity),
+      candidates: batches.map(b => ({ ...b, already_linked: linked.includes(b.id) }))
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
+// POST /api/bottlings/:id/candidate-batches  { batch_id, ml_used? }
+// Cria o vínculo em bottling_batches SEM abater remaining_ml.
+async function linkBatch (req, res) {
+  try {
+    const bottlingId = parseInt(req.params.id)
+    const batchId = parseInt(req.body.batch_id)
+    if (!batchId) return res.status(400).json({ error: 'batch_id é obrigatório' })
+
+    const bottling = await db('bottlings').where('id', bottlingId).first()
+    if (!bottling) return res.status(404).json({ error: 'Envase não encontrado' })
+    const batch = await db('batches').where('id', batchId).first()
+    if (!batch) return res.status(404).json({ error: 'Lote não encontrado' })
+
+    // Segurança: o lote precisa ser do mesmo produto do envase (candidato válido).
+    const product = bottling.product_ref ? await db('products').where('sku', bottling.product_ref).first() : null
+    if (!product || batch.product_id !== product.id) {
+      return res.status(409).json({ error: 'Lote não pertence ao produto deste envase — vínculo recusado.' })
+    }
+
+    const existing = await db('bottling_batches').where({ bottling_id: bottlingId, batch_id: batchId }).first()
+    if (existing) return res.status(409).json({ error: 'Este lote já está vinculado a este envase.' })
+
+    const ml = req.body.ml_used != null ? parseFloat(req.body.ml_used) : parseFloat(bottling.volume_ml) * parseInt(bottling.quantity)
+    const proportional_cost = parseFloat(batch.cost_per_ml || 0) * ml
+
+    const [row] = await db('bottling_batches')
+      .insert({ bottling_id: bottlingId, batch_id: batchId, ml_used: ml, proportional_cost })
+      .returning('*')
+
+    // Devolve já com dados para a tela renderizar sem recarregar tudo.
+    res.status(201).json({ ...row, batch_code: batch.batch_code, cost_per_ml: batch.cost_per_ml, project_name: product.project_name })
+  } catch (e) {
+    res.status(400).json({ error: e.message })
+  }
+}
+
+// DELETE /api/bottlings/:id/candidate-batches/:batchId
+// Desfaz o vínculo (undo). NÃO restaura remaining_ml (não abatemos ao vincular).
+async function unlinkBatch (req, res) {
+  try {
+    const deleted = await db('bottling_batches')
+      .where({ bottling_id: parseInt(req.params.id), batch_id: parseInt(req.params.batchId) })
+      .del()
+    if (!deleted) return res.status(404).json({ error: 'Vínculo não encontrado' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(400).json({ error: e.message })
+  }
+}
+
 module.exports = {
   list,
   getOne,
@@ -805,5 +897,8 @@ module.exports = {
   getBatchesInMaceration,
   stockSummary,
   getOrdersConsumingBottling,
-  getAvailableGifts
+  getAvailableGifts,
+  getCandidateBatches,
+  linkBatch,
+  unlinkBatch
 }

@@ -22,10 +22,10 @@ const TEMPLATE = {
   },
 
   Projetos: {
-    title: 'Tela: Produção → Projetos',
+    title: 'Tela: Produção → Projetos (SKU opcional — vínculo é pelo NOME do Projeto)',
     headers: ['Nome do Projeto', 'Nome Comercial', 'SKU', 'Marca Inspiração', 'Nome Inspiração', 'Gênero', 'Descrição do Conceito', 'Notas de Saída', 'Notas de Coração', 'Notas de Fundo', 'Observações'],
     example: [
-      [`${EXAMPLE_MARK} Dragon Tea X`, 'Wulong Cha X - Dragon Tea X', 'PFM-001', 'Nishane', 'Wulong Cha', 'Unissex', 'Notas cítricas com chá verde — fragrância luminosa e mística.', 'Bergamota, limão', 'Chá oolong, gengibre', 'Cedro, almíscar', 'Pronúncia: Druagan tee']
+      [`${EXAMPLE_MARK} Dragon Tea X`, 'Wulong Cha X - Dragon Tea X', '', 'Nishane', 'Wulong Cha', 'Unissex', 'Notas cítricas com chá verde — fragrância luminosa e mística.', 'Bergamota, limão', 'Chá oolong, gengibre', 'Cedro, almíscar', 'Deixe o SKU em branco se não usar — o nome do Projeto é a chave']
     ]
   },
 
@@ -58,7 +58,7 @@ const TEMPLATE = {
     title: 'Tela: Produção → Fórmulas',
     headers: ['Nome', 'Descrição', '% Essência', 'Projeto (opcional)', 'Ingrediente 1', '% 1', 'Ingrediente 2', '% 2', 'Ingrediente 3', '% 3', 'Ingrediente 4', '% 4', 'Ingrediente 5', '% 5'],
     example: [
-      [`${EXAMPLE_MARK} Fórmula Base v1`, 'EDP/Parfum 80/16/2/2 — sem base pronta', 16, '', 'Álcool 96°', 80, 'Propilenoglicol', 2, 'Fixador Premium', 2, '', '', '', '']
+      [`${EXAMPLE_MARK} Fórmula Base v1`, 'EDP/Parfum 80/16/2/2 — sem base pronta', 16, 'Dragon Tea X', 'Álcool 96°', 80, 'Propilenoglicol', 2, 'Fixador Premium', 2, '', '', '', '']
     ]
   },
 
@@ -72,10 +72,11 @@ const TEMPLATE = {
   },
 
   Envases: {
-    title: 'Tela: Produção → Envases',
-    headers: ['Código', 'Data do Envase', 'Projeto', 'Lote', 'Frasco', 'Rótulo', 'Volume (ml)', 'Qtd Produzida', 'Qtd Disponível', 'Tipo (normal/brinde)', 'Observações'],
+    title: 'Tela: Produção → Envases (Lote casa com o do produto por Projeto OU Fórmula)',
+    headers: ['Código', 'Data do Envase', 'Projeto', 'Fórmula', 'Lote', 'Frasco', 'Rótulo', 'Volume (ml)', 'Qtd Produzida', 'Qtd Disponível', 'Tipo (normal/brinde)', 'Observações'],
     example: [
-      [`${EXAMPLE_MARK} ENV-001`, '2026-03-25', 'Dragon Tea X', 'LOTE-001', 'Frasco Vidro 30ml', '', 30, 1, 1, 'normal', '']
+      [`${EXAMPLE_MARK} ENV-001`, '2026-03-25', 'Dragon Tea X', '', 'LOTE-001', 'Frasco Vidro 30ml', '', 30, 1, 1, 'normal', 'Vínculo pelo Projeto'],
+      [`${EXAMPLE_MARK} ENV-002`, '2026-04-25', '', 'Fórmula Base v1', 'LOTE-002', 'Frasco Vidro 30ml', '', 30, 1, 1, 'normal', 'Vínculo pela Fórmula (Projeto em branco)']
     ]
   },
 
@@ -84,6 +85,31 @@ const TEMPLATE = {
     headers: ['Nome', 'CPF/CNPJ', 'Telefone', 'Email', 'Endereço', 'Cidade', 'UF', 'CEP', 'Observações'],
     example: [
       [`${EXAMPLE_MARK} Maria Silva`, '123.456.789-00', '(11) 98888-7777', 'maria@email.com', 'Av. B, 200', 'São Paulo', 'SP', '01234-567', 'Cliente frequente']
+    ]
+  },
+
+  Embalagens: {
+    title: 'Tela: Comercial → Embalagens',
+    headers: ['Nome', 'Volume (ml)', 'Formato', 'Preço Sugerido (R$)'],
+    example: [
+      [`${EXAMPLE_MARK} Frasco 30ml`, 30, 'Frasco', 12.90],
+      [`${EXAMPLE_MARK} Frasco 50ml`, 50, 'Frasco', 18.00]
+    ]
+  },
+
+  'Preços': {
+    title: 'Tela: Comercial → Preços (produto identificado por Projeto)',
+    headers: ['Projeto', 'Volume (ml)', 'Preço (R$)', 'Válido de', 'Válido até', 'Embalagem', 'Observações'],
+    example: [
+      [`${EXAMPLE_MARK} Dragon Tea X`, 30, 87.90, '2026-01-01', '', 'Frasco 30ml', 'Tabela vigente']
+    ]
+  },
+
+  'Descontos por Volume': {
+    title: 'Tela: Comercial → Descontos por Volume',
+    headers: ['Embalagem', 'Quantidade Mínima', 'Desconto (%)'],
+    example: [
+      [`${EXAMPLE_MARK} Frasco 50ml`, 3, 10]
     ]
   }
 }
@@ -228,20 +254,65 @@ async function ensureFormula (trx, name) {
   return { id, name, product_id: null }
 }
 
+// Casamento TOLERANTE de produto (Projeto): ignora acento/caixa/espaço via
+// normCode. O usuário não usa SKU — a chave é o nome do Projeto/Fórmula, então
+// "Naxos", "naxos " e "NAXOS" precisam cair no mesmo produto. Índice normalizado
+// memoizado na transação (produtos só nascem em processProjetos, que roda antes
+// de Formulas/Lotes/Envases), evitando query por linha.
 async function findProduct (trx, { sku, commercialName, projectName }) {
-  if (sku) {
-    const p = await trx('products').where('sku', sku).first()
-    if (p) return p
+  if (!trx.__productIndex) {
+    const products = await trx('products').select('id', 'sku', 'commercial_name', 'project_name')
+    const bySku = new Map(); const byName = new Map(); const byId = new Map()
+    for (const p of products) {
+      byId.set(p.id, p)
+      if (p.sku) bySku.set(normCode(p.sku), p)
+      // project_name por último para vencer em caso de colisão com commercial_name
+      if (p.commercial_name) byName.set(normCode(p.commercial_name), p)
+      if (p.project_name) byName.set(normCode(p.project_name), p)
+    }
+    trx.__productIndex = { bySku, byName, byId }
   }
-  if (commercialName) {
-    const p = await trx('products').where('commercial_name', commercialName).first()
-    if (p) return p
-  }
-  if (projectName) {
-    const p = await trx('products').where('project_name', projectName).first()
-    if (p) return p
-  }
+  const idx = trx.__productIndex
+  if (sku) { const p = idx.bySku.get(normCode(sku)); if (p) return p }
+  if (commercialName) { const p = idx.byName.get(normCode(commercialName)); if (p) return p }
+  if (projectName) { const p = idx.byName.get(normCode(projectName)); if (p) return p }
   return null
+}
+
+// Produto por id (usa o mesmo índice memoizado). Usado para resolver o produto
+// do envase via Fórmula (formula.product_id) quando o Projeto não resolve.
+async function findProductById (trx, id) {
+  if (id == null) return null
+  await findProduct(trx, {}) // garante o índice construído
+  return trx.__productIndex.byId.get(id) || null
+}
+
+// Fórmula por nome, casamento TOLERANTE (acento/caixa/espaço). Índice memoizado
+// por transação — só leitura (envases não criam fórmula; rodam após Lotes).
+async function findFormula (trx, name) {
+  if (!name) return null
+  if (!trx.__formulaIndex) {
+    const idx = new Map()
+    for (const f of await trx('formulas').select('id', 'name', 'product_id')) {
+      idx.set(normCode(f.name), f)
+    }
+    trx.__formulaIndex = idx
+  }
+  return trx.__formulaIndex.get(normCode(name)) || null
+}
+
+// Tipo de embalagem por nome, casamento TOLERANTE. Índice memoizado; a aba
+// Embalagens é processada antes de Preços/Descontos, então já estão no trx.
+async function findPackagingType (trx, name) {
+  if (!name) return null
+  if (!trx.__packagingIndex) {
+    const idx = new Map()
+    for (const pt of await trx('packaging_types').select('id', 'name', 'volume_ml')) {
+      idx.set(normCode(pt.name), pt)
+    }
+    trx.__packagingIndex = idx
+  }
+  return trx.__packagingIndex.get(normCode(name)) || null
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -534,6 +605,12 @@ async function processLotes (trx, rows, dryRun) {
     }))
     console.log(`   Amostra 5 primeiras linhas:`, JSON.stringify(sample))
   }
+  // Índice TOLERANTE de fórmulas (acento/caixa/espaço via normCode). Mantido em
+  // memória e atualizado quando ensureFormula cria uma nova no meio do loop.
+  const formulaIndex = new Map()
+  for (const f of await trx('formulas').select('id', 'name', 'product_id')) {
+    formulaIndex.set(normCode(f.name), f)
+  }
   for (const r of rows) {
     // Campos NOT NULL do schema — se em branco na planilha, usa placeholders
     // e apenas registra warning (sem bloquear o import).
@@ -561,13 +638,16 @@ async function processLotes (trx, rows, dryRun) {
     // esse nome específico.
     const PLACEHOLDER_FORMULA = 'Sem fórmula (importação)'
     const formulaNome = toString(getCol(r, 'Fórmula', 'Formula')) || PLACEHOLDER_FORMULA
-    let formula = await trx('formulas').where('name', formulaNome).first()
+    // Casamento tolerante: "Fórmula Base", "formula base " e "FORMULA BASE"
+    // resolvem a mesma fórmula, evitando duplicatas por acento/caixa/espaço.
+    let formula = formulaIndex.get(normCode(formulaNome))
     if (!formula) {
       if (dryRun) {
         errors.push({ row: r._row, msg: `Fórmula "${formulaNome}" será criada automaticamente (complete depois na tela de Fórmulas)` })
         formula = { id: 0, product_id: null }
       } else {
         formula = await ensureFormula(trx, formulaNome)
+        formulaIndex.set(normCode(formulaNome), formula)
       }
     }
 
@@ -695,7 +775,16 @@ async function processEnvases (trx, rows, dryRun) {
     if (dryRun) { ok++; continue }
 
     const projetoNome = toString(getCol(r, 'Projeto'))
-    const product = projetoNome ? await findProduct(trx, { commercialName: projetoNome, projectName: projetoNome }) : null
+    let product = projetoNome ? await findProduct(trx, { commercialName: projetoNome, projectName: projetoNome }) : null
+    // Fallback: se o Projeto não resolveu, tenta pela Fórmula (formula.product_id).
+    // Atende o modelo "produto identificado por Projeto OU Fórmula".
+    if (!product) {
+      const formulaNome = toString(getCol(r, 'Fórmula', 'Formula'))
+      if (formulaNome) {
+        const f = await findFormula(trx, formulaNome)
+        if (f && f.product_id) product = await findProductById(trx, f.product_id)
+      }
+    }
 
     const loteCod = toString(getCol(r, 'Lote'))
     let batchId = null
@@ -807,6 +896,106 @@ async function processClientes (trx, rows, dryRun) {
   return { ok, errors }
 }
 
+// ── EMBALAGENS (packaging_types) ────────────────────────────────────────────────
+// Sem FK. Processada ANTES de Preços/Descontos (que a referenciam). Upsert por nome.
+async function processEmbalagens (trx, rows, dryRun) {
+  const errors = []; let ok = 0
+  for (const r of rows) {
+    const nome = toString(getCol(r, 'Nome'))
+    if (!nome) { errors.push({ row: r._row, msg: 'Nome em branco — linha ignorada' }); continue }
+    let volume = toNumber(getCol(r, 'Volume (ml)', 'Volume'))
+    if (volume == null || volume < 0) { volume = 0; errors.push({ row: r._row, msg: 'Volume (ml) em branco — usando 0, edite depois' }) }
+    if (dryRun) { ok++; continue }
+    const data = {
+      name: nome,
+      volume_ml: volume,
+      format: toString(getCol(r, 'Formato')) || null,
+      suggested_price: toNumber(getCol(r, 'Preço Sugerido (R$)', 'Preço Sugerido', 'Preco Sugerido')),
+      active: true
+    }
+    const existing = await findPackagingType(trx, nome)
+    if (existing) {
+      await trx('packaging_types').where('id', existing.id).update(data)
+    } else {
+      const [ins] = await trx('packaging_types').insert(data).returning('id')
+      const id = typeof ins === 'object' ? ins.id : ins
+      // mantém o índice memoizado coerente para as linhas seguintes
+      if (trx.__packagingIndex) trx.__packagingIndex.set(normCode(nome), { id, name: nome, volume_ml: volume })
+    }
+    ok++
+  }
+  return { ok, errors }
+}
+
+// ── PREÇOS (price_lists) ────────────────────────────────────────────────────────
+// Produto por Projeto (tolerante). volume vem da coluna ou da embalagem. product_id
+// é NOT NULL: sem produto, a linha é ignorada com aviso. Upsert por (produto, volume, embalagem).
+async function processPrecos (trx, rows, dryRun) {
+  const errors = []; let ok = 0
+  for (const r of rows) {
+    const projetoNome = toString(getCol(r, 'Projeto'))
+    const preco = toNumber(getCol(r, 'Preço (R$)', 'Preço', 'Preco'))
+    if (!projetoNome) { errors.push({ row: r._row, msg: 'Projeto em branco — linha ignorada' }); continue }
+    if (preco == null || preco < 0) { errors.push({ row: r._row, msg: `Preço inválido para "${projetoNome}" — linha ignorada` }); continue }
+    if (dryRun) { ok++; continue }
+
+    const product = await findProduct(trx, { commercialName: projetoNome, projectName: projetoNome })
+    if (!product) { errors.push({ row: r._row, msg: `Projeto "${projetoNome}" não encontrado — preço ignorado` }); continue }
+
+    const embNome = toString(getCol(r, 'Embalagem'))
+    const pt = embNome ? await findPackagingType(trx, embNome) : null
+    if (embNome && !pt) errors.push({ row: r._row, msg: `Embalagem "${embNome}" não encontrada — preço salvo sem embalagem` })
+
+    let volume = toNumber(getCol(r, 'Volume (ml)', 'Volume'))
+    if (volume == null && pt) volume = parseFloat(pt.volume_ml)
+    if (volume == null || volume <= 0) { errors.push({ row: r._row, msg: `Volume ausente para "${projetoNome}" — preço ignorado` }); continue }
+
+    const data = {
+      product_id: product.id,
+      packaging_type_id: pt ? pt.id : null,
+      volume_ml: volume,
+      price: preco,
+      valid_from: parseExcelDate(getCol(r, 'Válido de', 'Valido de')) || new Date().toISOString().slice(0, 10),
+      valid_to: parseExcelDate(getCol(r, 'Válido até', 'Valido ate')),
+      notes: toString(getCol(r, 'Observações', 'Observacoes'))
+    }
+    // Upsert por (product_id, volume_ml, packaging_type_id) — preço vigente por produto/volume/embalagem.
+    let q = trx('price_lists').where('product_id', product.id).where('volume_ml', volume)
+    q = pt ? q.where('packaging_type_id', pt.id) : q.whereNull('packaging_type_id')
+    const existing = await q.first()
+    if (existing) await trx('price_lists').where('id', existing.id).update(data)
+    else await trx('price_lists').insert(data)
+    ok++
+  }
+  return { ok, errors }
+}
+
+// ── DESCONTOS POR VOLUME (volume_discounts) ─────────────────────────────────────
+// Embalagem opcional (nullable). Upsert por (embalagem, quantidade mínima).
+async function processDescontos (trx, rows, dryRun) {
+  const errors = []; let ok = 0
+  for (const r of rows) {
+    const minQ = toNumber(getCol(r, 'Quantidade Mínima', 'Quantidade Minima', 'Qtd Mínima'))
+    const desc = toNumber(getCol(r, 'Desconto (%)', 'Desconto'))
+    if (minQ == null || minQ < 1) { errors.push({ row: r._row, msg: 'Quantidade Mínima inválida — linha ignorada' }); continue }
+    if (desc == null || desc <= 0 || desc > 100) { errors.push({ row: r._row, msg: 'Desconto (%) deve ser entre 0 e 100 — linha ignorada' }); continue }
+    if (dryRun) { ok++; continue }
+
+    const embNome = toString(getCol(r, 'Embalagem'))
+    const pt = embNome ? await findPackagingType(trx, embNome) : null
+    if (embNome && !pt) errors.push({ row: r._row, msg: `Embalagem "${embNome}" não encontrada — desconto salvo sem embalagem` })
+
+    const data = { packaging_type_id: pt ? pt.id : null, min_quantity: Math.round(minQ), discount_percentage: desc, active: true }
+    let q = trx('volume_discounts').where('min_quantity', Math.round(minQ))
+    q = pt ? q.where('packaging_type_id', pt.id) : q.whereNull('packaging_type_id')
+    const existing = await q.first()
+    if (existing) await trx('volume_discounts').where('id', existing.id).update(data)
+    else await trx('volume_discounts').insert(data)
+    ok++
+  }
+  return { ok, errors }
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // PARSE + ORQUESTRADOR
 // ══════════════════════════════════════════════════════════════════════════════
@@ -830,7 +1019,11 @@ const SHEET_PROCESSORS = {
   'Formulas':       { fn: processFormulas },
   'Lotes':          { fn: processLotes },
   'Envases':        { fn: processEnvases },
-  'Clientes':       { fn: processClientes }
+  'Clientes':       { fn: processClientes },
+  // Embalagens ANTES de Preços/Descontos (FK packaging_type_id)
+  'Embalagens':          { fn: processEmbalagens },
+  'Preços':              { fn: processPrecos },
+  'Descontos por Volume':{ fn: processDescontos }
 }
 
 // Processa todas as abas ou apenas uma (se sheetName for fornecido)

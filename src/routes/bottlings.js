@@ -2,6 +2,7 @@ const router = require('express').Router()
 const ctrl = require('../controllers/bottlingsController')
 const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
+const { authenticate } = require('../middleware/auth')
 
 const bottlingRules = [
   body('bottling_code').optional().trim(),
@@ -32,9 +33,14 @@ router.get('/available-batches', ctrl.getAvailableBatches)
 router.get('/in-maceration', ctrl.getBatchesInMaceration)
 router.get('/gifts-available', ctrl.getAvailableGifts)
 router.get('/:id/orders', [param('id').isInt()], validate, ctrl.getOrdersConsumingBottling)
+// Vínculo lote↔envase (reconciliação histórica, sem abate) — Fase 2
+router.get('/:id/candidate-batches', [param('id').isInt()], validate, ctrl.getCandidateBatches)
+router.post('/:id/candidate-batches', authenticate, [param('id').isInt(), body('batch_id').isInt({ min: 1 })], validate, ctrl.linkBatch)
+router.delete('/:id/candidate-batches/:batchId', authenticate, [param('id').isInt(), param('batchId').isInt()], validate, ctrl.unlinkBatch)
 router.get('/:id', [param('id').isInt()], validate, ctrl.getOne)
-router.post('/', bottlingRules, validate, ctrl.create)
-router.patch('/:id', [param('id').isInt(), ...updateBottlingRules], validate, ctrl.update)
-router.delete('/:id', [param('id').isInt()], validate, ctrl.remove)
+// Rotas de ESCRITA — exigem autenticação
+router.post('/', authenticate, bottlingRules, validate, ctrl.create)
+router.patch('/:id', authenticate, [param('id').isInt(), ...updateBottlingRules], validate, ctrl.update)
+router.delete('/:id', authenticate, [param('id').isInt()], validate, ctrl.remove)
 
 module.exports = router
