@@ -166,6 +166,7 @@ exports.create = async (req, res) => {
       items,
       discount = 0,
       shipping = 0,
+      freight_type = null,
       notes = '',
       channel = '',
       coupon_code = null
@@ -213,6 +214,7 @@ exports.create = async (req, res) => {
         channel,
         discount,
         shipping,
+        freight_type: freight_type ? String(freight_type).trim() : null,
         notes,
         coupon_id: coupon?.id || null
       })
