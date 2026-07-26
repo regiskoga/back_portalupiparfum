@@ -140,11 +140,34 @@ try {
 
 // Health check com CORS headers explícitos
 app.get('/api/health', (_req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     ts: new Date().toISOString(),
     cors: 'enabled'
   })
+})
+
+// ─── ① Stream de eventos em tempo real (SSE) ────────────────────────────────────
+// EventSource não envia header Authorization, então a página só assina o canal
+// de SINAIS (sem dados sensíveis). Mantém a conexão aberta e envia heartbeat.
+const events = require('./services/events')
+app.get('/api/events', (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no', // desliga buffering em proxies (Nginx/Traefik)
+  })
+  res.flushHeaders?.()
+  res.write(': connected\n\n')
+
+  events.addClient(res)
+
+  // Heartbeat p/ manter viva a conexão através de proxies/timeouts
+  const hb = setInterval(() => {
+    try { res.write(': ping\n\n') } catch (_) { clearInterval(hb) }
+  }, 25000)
+  req.on('close', () => clearInterval(hb))
 })
 
 // CORS test endpoint

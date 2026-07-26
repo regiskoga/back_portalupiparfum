@@ -6,6 +6,7 @@
 const { db } = require('../models/db')
 const orderDecisionEngine = require('../services/orderDecisionEngine')
 const activityLogger = require('../services/activityLogger')
+const events = require('../services/events')
 
 // ─── VERIFICAÇÃO DE BRINDE DUPLICADO (PROMPT #3) ──────────────────────────────
 async function checkGiftDuplication(customer_id, gift_name) {
@@ -32,6 +33,110 @@ async function checkGiftDuplication(customer_id, gift_name) {
   } catch (error) {
     console.error('❌ Erro ao verificar brinde duplicado:', error)
     return { isDuplicate: false, error: error.message }
+  }
+}
+
+/**
+ * Helper compartilhado (tarefas ③ e ④): dado um conjunto de product_id,
+ * retorna um mapa product_id -> total de envases PRONTOS disponíveis.
+ * "Pronto" = bottling type 'normal', ativo, com quantity_available > 0.
+ * Resolução product_id -> sku -> bottlings.product_ref (chave de junção interna).
+ */
+async function getReadyBottlingsByProduct (productIds) {
+  const ids = [...new Set((productIds || []).filter(Boolean).map(Number))]
+  if (ids.length === 0) return {}
+
+  // IMPORTANTE: juntar products→bottlings DIRETO. Passar por order_items causaria
+  // fan-out (o produto multiplicaria o estoque pelo nº de itens de pedido dele).
+  const rows = await db('products as p')
+    .join('bottlings as b', 'b.product_ref', 'p.sku')
+    .whereIn('p.id', ids)
+    .where('b.type', 'normal')
+    .where('b.active', true)
+    .where('b.quantity_available', '>', 0)
+    .whereNotNull('p.sku')
+    .where('p.sku', '<>', '')
+    .groupBy('p.id')
+    .select('p.id as product_id')
+    .sum('b.quantity_available as ready_available')
+    .count('b.id as ready_lots')
+
+  const map = {}
+  for (const r of rows) {
+    map[r.product_id] = {
+      ready_available: parseInt(r.ready_available) || 0,
+      ready_lots: parseInt(r.ready_lots) || 0,
+    }
+  }
+  return map
+}
+exports.getReadyBottlingsByProduct = getReadyBottlingsByProduct
+
+/**
+ * ③ Fila de produção: todos os pedidos CONFIRMADOS, do mais antigo ao mais
+ * recente, já com seus itens (perfumes) e o saldo de envases prontos por
+ * produto — para acompanhar produção sem abrir pedido por pedido.
+ */
+exports.productionQueue = async (req, res) => {
+  try {
+    const orders = await db('orders')
+      .leftJoin('customers', 'orders.customer_id', 'customers.id')
+      .where('orders.status', 'Confirmed')
+      .orderBy('orders.created_at', 'asc') // mais antigo primeiro
+      .select(
+        'orders.id', 'orders.code', 'orders.status', 'orders.created_at',
+        'orders.channel', 'orders.notes',
+        'customers.name as customer_name', 'customers.phone as customer_phone'
+      )
+
+    if (orders.length === 0) return res.json({ data: [] })
+
+    const orderIds = orders.map(o => o.id)
+    const items = await db('order_items')
+      .leftJoin('products', 'order_items.product_id', 'products.id')
+      .whereIn('order_items.order_id', orderIds)
+      .whereNotNull('order_items.product_id') // só itens "ricos" (perfumes)
+      .select(
+        'order_items.id', 'order_items.order_id', 'order_items.product_id',
+        'order_items.product_name', 'order_items.volume_ml',
+        'order_items.quantity', 'order_items.unit_price',
+        'products.commercial_name', 'products.inspiration_brand', 'products.inspiration_name'
+      )
+
+    // Envases já vinculados por item (quanto do pedido já foi atendido)
+    const itemIds = items.map(i => i.id)
+    const links = itemIds.length > 0
+      ? await db('order_item_bottlings')
+          .whereIn('order_item_id', itemIds)
+          .groupBy('order_item_id')
+          .select('order_item_id')
+          .sum('quantity as linked_quantity')
+      : []
+    const linkedByItem = Object.fromEntries(
+      links.map(l => [l.order_item_id, parseInt(l.linked_quantity) || 0])
+    )
+
+    const readyByProduct = await getReadyBottlingsByProduct(items.map(i => i.product_id))
+
+    const itemsByOrder = {}
+    for (const it of items) {
+      const linked = linkedByItem[it.id] || 0
+      const ready = readyByProduct[it.product_id] || { ready_available: 0, ready_lots: 0 }
+      const enriched = {
+        ...it,
+        linked_quantity: linked,
+        pending_quantity: Math.max(0, parseInt(it.quantity) - linked),
+        ready_available: ready.ready_available,
+        ready_lots: ready.ready_lots,
+      }
+      ;(itemsByOrder[it.order_id] ||= []).push(enriched)
+    }
+
+    const data = orders.map(o => ({ ...o, items: itemsByOrder[o.id] || [] }))
+    res.json({ data })
+  } catch (error) {
+    console.error('Error building production queue:', error)
+    res.status(500).json({ error: 'Failed to build production queue' })
   }
 }
 
@@ -141,10 +246,14 @@ exports.getById = async (req, res) => {
       if (!linksByItem[l.order_item_id]) linksByItem[l.order_item_id] = []
       linksByItem[l.order_item_id].push(l)
     }
+    // ④ Envases prontos disponíveis por produto (só aparece na UI se > 0)
+    const readyByProduct = await getReadyBottlingsByProduct(items.map(i => i.product_id))
     order.items = items.map(i => ({
       ...i,
       bottling_links: linksByItem[i.id] || [],
       linked_quantity: (linksByItem[i.id] || []).reduce((s, l) => s + parseInt(l.quantity), 0),
+      ready_available: (readyByProduct[i.product_id] || {}).ready_available || 0,
+      ready_lots: (readyByProduct[i.product_id] || {}).ready_lots || 0,
     }))
 
     res.json(order)
@@ -328,6 +437,8 @@ exports.create = async (req, res) => {
 
     await trx.commit()
 
+    events.broadcast('orders-changed', { id: order.id, action: 'created' })
+
     res.status(201).json({
       order: {
         ...order,
@@ -448,12 +559,35 @@ exports.updateStatus = async (req, res) => {
         updateData.stock_decremented = false
       }
 
+      // ── Brindes: estoque é debitado no momento em que o brinde é adicionado
+      //    (orderGiftsController.create), independente de stock_decremented.
+      //    Ao CANCELAR, devolver o estoque dos brindes; ao REABRIR (sair de
+      //    Cancelado), debitar de novo. Gateado pela transição de status para
+      //    ser idempotente (não restaura/debita duas vezes num re-cancel). ──
+      const enteringCancelled = status === 'Cancelled' && order.status !== 'Cancelled'
+      const leavingCancelled  = order.status === 'Cancelled' && status !== 'Cancelled'
+      if (enteringCancelled || leavingCancelled) {
+        const gifts = await trx('order_gifts').where({ order_id: id }).select('bottling_id', 'quantity')
+        for (const g of gifts) {
+          if (enteringCancelled) {
+            await trx('bottlings').where({ id: g.bottling_id }).increment('quantity_available', parseInt(g.quantity))
+          } else {
+            await trx.raw(
+              'UPDATE bottlings SET quantity_available = GREATEST(0, quantity_available - ?) WHERE id = ?',
+              [parseInt(g.quantity), g.bottling_id]
+            )
+          }
+        }
+      }
+
       return trx('orders').where({ id }).update(updateData).returning('*')
     })
 
     await activityLogger.log('order_updated', 'order', id, {
       description: `Status do pedido alterado para: ${status}`,
     })
+
+    events.broadcast('orders-changed', { id: parseInt(id), status })
 
     res.json(updated)
   } catch (error) {
@@ -572,6 +706,7 @@ exports.updateItem = async (req, res) => {
       description: `Item ${itemId} do pedido ${order.code} atualizado`,
     })
 
+    events.broadcast('orders-changed', { id: parseInt(orderId), action: 'item-updated' })
     res.json(updated)
   } catch (error) {
     console.error('Error updating order item:', error)
@@ -627,6 +762,7 @@ exports.linkBottling = async (req, res) => {
       .update({ bottling_id: bottling_id != null ? parseInt(bottling_id) : null })
       .returning('*')
 
+    events.broadcast('orders-changed', { id: parseInt(orderId), action: 'bottling-linked' })
     res.json(updated)
   } catch (error) {
     res.status(500).json({ error: error.message })
@@ -690,6 +826,7 @@ exports.addBottling = async (req, res) => {
       }
     })
 
+    events.broadcast('orders-changed', { id: parseInt(orderId), action: 'bottling-added' })
     res.json({ linked: quantityToLink, bottling_id: parseInt(bottling_id) })
   } catch (error) {
     res.status(500).json({ error: error.message })
@@ -724,6 +861,7 @@ exports.removeBottling = async (req, res) => {
       await trx('order_item_bottlings').where({ id: parseInt(linkId) }).del()
     })
 
+    events.broadcast('orders-changed', { id: parseInt(orderId), action: 'bottling-removed' })
     res.json({ removed: true })
   } catch (error) {
     res.status(500).json({ error: error.message })

@@ -1,4 +1,5 @@
 const { db } = require('../models/db')
+const events = require('../services/events')
 
 // ─── LIST GIFTS OF AN ORDER ───────────────────────────────────────────────────
 async function list (req, res) {
@@ -69,6 +70,7 @@ async function create (req, res) {
       return gift
     })
 
+    events.broadcast('orders-changed', { id: orderId, action: 'gift-added' })
     res.status(201).json(result)
   } catch (e) {
     res.status(400).json({ error: e.message })
@@ -87,14 +89,21 @@ async function remove (req, res) {
         .first()
       if (!gift) throw new Error('Brinde não encontrado neste pedido')
 
-      // Restaura saldo do envase
-      await trx('bottlings')
-        .where('id', gift.bottling_id)
-        .increment('quantity_available', gift.quantity)
+      const order = await trx('orders').where('id', orderId).first()
+
+      // Restaura saldo do envase — MAS não se o pedido já está Cancelado: nesse
+      // caso o updateStatus já devolveu o estoque dos brindes ao cancelar;
+      // creditar de novo aqui causaria dupla restauração.
+      if (!order || order.status !== 'Cancelled') {
+        await trx('bottlings')
+          .where('id', gift.bottling_id)
+          .increment('quantity_available', gift.quantity)
+      }
 
       await trx('order_gifts').where('id', giftId).del()
     })
 
+    events.broadcast('orders-changed', { id: orderId, action: 'gift-removed' })
     res.json({ message: 'Brinde removido' })
   } catch (e) {
     res.status(400).json({ error: e.message })

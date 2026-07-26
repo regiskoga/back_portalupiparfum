@@ -21,6 +21,13 @@ router.use('/:order_id/gifts', orderGiftsRouter)
 router.get('/', ordersController.list)
 
 /**
+ * GET /api/orders/production-queue
+ * ③ Fila de produção: pedidos confirmados (mais antigo → recente) com itens.
+ * Declarada ANTES de /:id para não ser capturada pelo pattern de parâmetro.
+ */
+router.get('/production-queue', ordersController.productionQueue)
+
+/**
  * GET /api/orders/:id
  * Busca um pedido por ID com itens
  */
