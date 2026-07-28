@@ -748,13 +748,55 @@ async function stockSummary (req, res) {
     const committedMap = {}
     committed.forEach(r => { committedMap[r.product_id] = parseFloat(r.committed_ml || 0) })
 
+    // Produto acabado (envases prontos) por produto: se já há envase pronto, aquela
+    // demanda NÃO precisa de líquido de lote → abate do comprometido. Chave de
+    // junção: bottlings.product_ref = products.sku (type 'normal', ativo, com saldo).
+    const finished = await db('products as p')
+      .join('bottlings as b', 'b.product_ref', 'p.sku')
+      .where('b.type', 'normal')
+      .where('b.active', true)
+      .where('b.quantity_available', '>', 0)
+      .whereNotNull('p.sku')
+      .where('p.sku', '<>', '')
+      .groupBy('p.id', 'p.project_name', 'p.commercial_name')
+      .select(
+        'p.id as product_id', 'p.project_name', 'p.commercial_name',
+        db.raw('COALESCE(SUM(b.quantity_available), 0) as finished_units'),
+        db.raw('COALESCE(SUM(b.quantity_available * b.volume_ml), 0) as finished_ml')
+      )
+    const finishedMap = {}
+    finished.forEach(r => {
+      finishedMap[r.product_id] = {
+        units: parseInt(r.finished_units) || 0,
+        ml:    parseFloat(r.finished_ml) || 0,
+        project_name: r.project_name,
+        commercial_name: r.commercial_name,
+      }
+    })
+
     const today = todayLocal()
 
-    const summary = batchStock.map(row => {
+    // Nomes por produto (lote tem prioridade; produto acabado preenche os sem lote).
+    const batchMap = {}
+    batchStock.forEach(r => { batchMap[r.product_id] = r })
+
+    // União de produtos: com lote, com comprometido e com produto acabado —
+    // assim o produto acabado aparece mesmo sem lote ativo.
+    const productIds = new Set([
+      ...batchStock.map(r => r.product_id),
+      ...Object.keys(committedMap).map(Number),
+      ...Object.keys(finishedMap).map(Number),
+    ])
+
+    const summary = [...productIds].map(product_id => {
+      const row = batchMap[product_id] || {}
+      const fin = finishedMap[product_id] || { units: 0, ml: 0 }
       const total_ml      = parseFloat(row.total_ml      || 0)
       const ready_ml      = parseFloat(row.ready_ml      || 0)
       const macerating_ml = parseFloat(row.macerating_ml || 0)
-      const committed_ml  = committedMap[row.product_id] || 0
+      const committed_raw = committedMap[product_id] || 0
+      // Produto acabado cobre parte da demanda → não conta como comprometido de lote.
+      const committed_ml  = Math.max(0, committed_raw - fin.ml)
 
       let earliest_maceration_end = null
       let days_until_ready = null
@@ -768,13 +810,16 @@ async function stockSummary (req, res) {
       }
 
       return {
-        product_id:      row.product_id,
-        project_name:    row.project_name,
-        commercial_name: row.commercial_name,
+        product_id,
+        project_name:    row.project_name    || fin.project_name    || null,
+        commercial_name: row.commercial_name || fin.commercial_name || null,
         total_ml,
         ready_ml,
         macerating_ml,
-        committed_ml,
+        committed_ml,               // já descontado do produto acabado
+        committed_raw,              // comprometido bruto (antes do abate), p/ transparência
+        finished_units: fin.units,  // envases prontos (produto acabado)
+        finished_ml:    fin.ml,
         // Disponível só conta o que está pronto para envase
         available_ml: Math.max(0, ready_ml - committed_ml),
         // Data prevista de liberação do lote em maceração mais próximo (null se não há).

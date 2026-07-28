@@ -116,6 +116,30 @@ exports.productionQueue = async (req, res) => {
       links.map(l => [l.order_item_id, parseInt(l.linked_quantity) || 0])
     )
 
+    // Vínculos detalhados por item (p/ exibir e remover direto na fila)
+    const detailLinks = itemIds.length > 0
+      ? await db('order_item_bottlings as oib')
+          .join('bottlings as b', 'b.id', 'oib.bottling_id')
+          .whereIn('oib.order_item_id', itemIds)
+          .select('oib.id', 'oib.order_item_id', 'oib.bottling_id', 'oib.quantity',
+                  'b.bottling_code', 'b.volume_ml', 'b.quantity_available')
+      : []
+    const linksListByItem = {}
+    for (const l of detailLinks) { (linksListByItem[l.order_item_id] ||= []).push(l) }
+
+    // Envases candidatos por produto (normal, ativo, com saldo) p/ vincular na fila
+    const prodIds = [...new Set(items.map(i => i.product_id).filter(Boolean))]
+    const candRows = prodIds.length > 0
+      ? await db('products as p')
+          .join('bottlings as b', 'b.product_ref', 'p.sku')
+          .whereIn('p.id', prodIds)
+          .where('b.type', 'normal').where('b.active', true).where('b.quantity_available', '>', 0)
+          .whereNotNull('p.sku').where('p.sku', '<>', '')
+          .select('p.id as product_id', 'b.id', 'b.bottling_code', 'b.volume_ml', 'b.quantity_available')
+      : []
+    const candByProduct = {}
+    for (const c of candRows) { (candByProduct[c.product_id] ||= []).push(c) }
+
     const readyByProduct = await getReadyBottlingsByProduct(items.map(i => i.product_id))
 
     const itemsByOrder = {}
@@ -128,6 +152,8 @@ exports.productionQueue = async (req, res) => {
         pending_quantity: Math.max(0, parseInt(it.quantity) - linked),
         ready_available: ready.ready_available,
         ready_lots: ready.ready_lots,
+        bottling_links: linksListByItem[it.id] || [],
+        available_bottlings: candByProduct[it.product_id] || [],
       }
       ;(itemsByOrder[it.order_id] ||= []).push(enriched)
     }
@@ -503,7 +529,7 @@ exports.checkGifts = async (req, res) => {
 exports.updateStatus = async (req, res) => {
   try {
     const { id } = req.params
-    const { status, discount, notes } = req.body
+    const { status, discount, notes, cancellation_reason } = req.body
 
     const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled']
     if (!validStatuses.includes(status)) {
@@ -512,6 +538,14 @@ exports.updateStatus = async (req, res) => {
 
     const order = await db('orders').where({ id }).first()
     if (!order) return res.status(404).json({ error: 'Order not found' })
+
+    // ── Trava: cancelamento exige motivo (evita cancelar sem querer) ──
+    if (status === 'Cancelled') {
+      const reason = (cancellation_reason || '').trim()
+      if (!reason) {
+        return res.status(400).json({ error: 'Informe o motivo do cancelamento.' })
+      }
+    }
 
     // ── Trava: só pode marcar Pronto se todos os itens têm envases suficientes ──
     if (status === 'Ready') {
@@ -534,6 +568,9 @@ exports.updateStatus = async (req, res) => {
     const updateData = { status, updated_at: db.fn.now() }
     if (discount !== undefined) updateData.discount = parseFloat(discount) || 0
     if (notes    !== undefined) updateData.notes    = notes
+    // Guarda o motivo ao cancelar; limpa se o pedido for reaberto.
+    if (status === 'Cancelled') updateData.cancellation_reason = (cancellation_reason || '').trim()
+    else if (order.status === 'Cancelled') updateData.cancellation_reason = null
 
     const [updated] = await db.transaction(async (trx) => {
       // ── Confirmação: debitar via junction table ──────────────────────────
