@@ -186,4 +186,19 @@ router.patch(
   ordersController.registerPayment
 )
 
+/**
+ * PATCH /api/orders/:id/freight
+ * Atualiza frete (valor + tipo) em qualquer fase antes de concluído
+ */
+router.patch(
+  '/:id/freight',
+  [
+    param('id').isInt(),
+    body('shipping').optional().isFloat({ min: 0 }).withMessage('shipping must be >= 0'),
+    body('freight_type').optional({ nullable: true }).isString(),
+  ],
+  validate,
+  ordersController.updateFreight
+)
+
 module.exports = router

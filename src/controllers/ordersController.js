@@ -572,6 +572,16 @@ exports.updateStatus = async (req, res) => {
     if (status === 'Cancelled') updateData.cancellation_reason = (cancellation_reason || '').trim()
     else if (order.status === 'Cancelled') updateData.cancellation_reason = null
 
+    // Guarda a FASE de origem do cancelamento, gateado pela TRANSIÇÃO (entrar em
+    // Cancelled captura o status anterior; sair de Cancelled limpa). Não usar
+    // `status === 'Cancelled'` puro: um re-cancel via API sobrescreveria a origem
+    // com 'Cancelled'. Espelha a lógica entering/leaving dos brindes.
+    if (status === 'Cancelled' && order.status !== 'Cancelled') {
+      updateData.cancelled_from_status = order.status
+    } else if (status !== 'Cancelled' && order.status === 'Cancelled') {
+      updateData.cancelled_from_status = null
+    }
+
     const [updated] = await db.transaction(async (trx) => {
       // ── Confirmação: debitar via junction table ──────────────────────────
       if (status === 'Confirmed' && !order.stock_decremented) {
@@ -1014,6 +1024,43 @@ exports.applyCoupon = async (req, res) => {
     res.json({ ...updated, coupon_code: coupon.code, coupon_type: coupon.type, coupon_discount: couponDiscount })
   } catch (error) {
     console.error('Error applying coupon:', error)
+    res.status(500).json({ error: error.message })
+  }
+}
+
+/**
+ * Atualiza o frete do pedido (valor + tipo) em qualquer fase ANTES de concluído.
+ * Bloqueado quando Entregue ou Cancelado. Mantém o padrão de broadcast SSE +
+ * activity log das demais mutações de pedido.
+ */
+exports.updateFreight = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { shipping, freight_type } = req.body
+
+    const order = await db('orders').where({ id }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+    if (['Delivered', 'Cancelled'].includes(order.status)) {
+      return res.status(400).json({ error: 'Frete não pode ser alterado em pedido Entregue ou Cancelado' })
+    }
+
+    const updateData = { updated_at: db.fn.now() }
+    if (shipping !== undefined) updateData.shipping = Math.max(0, parseFloat(shipping) || 0)
+    if (freight_type !== undefined) {
+      const ft = freight_type == null ? null : String(freight_type).trim()
+      updateData.freight_type = ft || null
+    }
+
+    const [updated] = await db('orders').where({ id }).update(updateData).returning('*')
+
+    await activityLogger.log('order_updated', 'order', id, {
+      description: `Frete do pedido ${order.code} atualizado`,
+    })
+
+    events.broadcast('orders-changed', { id: parseInt(id), action: 'freight-updated' })
+    res.json(updated)
+  } catch (error) {
+    console.error('Error updating order freight:', error)
     res.status(500).json({ error: error.message })
   }
 }
