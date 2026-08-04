@@ -85,7 +85,7 @@ router.patch(
   '/:id/status',
   [
     body('status')
-      .isIn(['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled'])
+      .isIn(['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled', 'Lost'])
       .withMessage('Invalid status')
   ],
   validate,

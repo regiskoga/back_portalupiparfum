@@ -73,15 +73,17 @@ async function getReadyBottlingsByProduct (productIds) {
 exports.getReadyBottlingsByProduct = getReadyBottlingsByProduct
 
 /**
- * ③ Fila de produção: todos os pedidos CONFIRMADOS, do mais antigo ao mais
- * recente, já com seus itens (perfumes) e o saldo de envases prontos por
- * produto — para acompanhar produção sem abrir pedido por pedido.
+ * ③ Fila de produção: pedidos CONFIRMADOS (aguardando) e EM PRODUÇÃO (em
+ * andamento), do mais antigo ao mais recente, já com seus itens (perfumes) e o
+ * saldo de envases prontos por produto — para acompanhar produção sem abrir
+ * pedido por pedido. Ao avançar de Confirmado p/ Em Produção o pedido continua
+ * na fila (antes sumia porque o filtro era só 'Confirmed').
  */
 exports.productionQueue = async (req, res) => {
   try {
     const orders = await db('orders')
       .leftJoin('customers', 'orders.customer_id', 'customers.id')
-      .where('orders.status', 'Confirmed')
+      .whereIn('orders.status', ['Confirmed', 'In Production'])
       .orderBy('orders.created_at', 'asc') // mais antigo primeiro
       .select(
         'orders.id', 'orders.code', 'orders.status', 'orders.created_at',
@@ -529,9 +531,9 @@ exports.checkGifts = async (req, res) => {
 exports.updateStatus = async (req, res) => {
   try {
     const { id } = req.params
-    const { status, discount, notes, cancellation_reason } = req.body
+    const { status, discount, notes, cancellation_reason, loss_reason } = req.body
 
-    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled']
+    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled', 'Lost']
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid status' })
     }
@@ -544,6 +546,14 @@ exports.updateStatus = async (req, res) => {
       const reason = (cancellation_reason || '').trim()
       if (!reason) {
         return res.status(400).json({ error: 'Informe o motivo do cancelamento.' })
+      }
+    }
+
+    // ── Trava: Perdido/Avariado exige observação (documenta a perda) ──
+    if (status === 'Lost') {
+      const obs = (loss_reason || '').trim()
+      if (!obs) {
+        return res.status(400).json({ error: 'Informe a observação da perda/avaria.' })
       }
     }
 
@@ -580,6 +590,18 @@ exports.updateStatus = async (req, res) => {
       updateData.cancelled_from_status = order.status
     } else if (status !== 'Cancelled' && order.status === 'Cancelled') {
       updateData.cancelled_from_status = null
+    }
+
+    // Perdido/Avariado: grava observação + fase de origem na transição; limpa ao sair.
+    // OBS: NÃO restaura estoque nem brindes (a mercadoria se perdeu) — por isso 'Lost'
+    // fica fora dos blocos de restore mais abaixo, mantendo stock_decremented como está.
+    if (status === 'Lost') updateData.loss_reason = (loss_reason || '').trim()
+    else if (order.status === 'Lost') updateData.loss_reason = null
+
+    if (status === 'Lost' && order.status !== 'Lost') {
+      updateData.lost_from_status = order.status
+    } else if (status !== 'Lost' && order.status === 'Lost') {
+      updateData.lost_from_status = null
     }
 
     const [updated] = await db.transaction(async (trx) => {
