@@ -689,7 +689,13 @@ async function processLotes (trx, rows, dryRun) {
       maceration_end: parseExcelDate(getCol(r, 'Fim Maceração', 'Fim Maceracao')),
       notes: toString(getCol(r, 'Observações', 'Observacoes')),
       active: true,
-      reduced_lot_number: 1,
+      // Número do lote extraído do próprio código (ex.: LOTE-00002 → 2). Antes era
+      // fixo em 1, o que fazia todo projeto com 2+ lotes mostrar "[Lote 1]".
+      // Determinístico e idempotente na reimportação (o código não muda).
+      reduced_lot_number: (() => {
+        const m = String(codigo || '').match(/\d+/g)
+        return m && m.length ? parseInt(m[m.length - 1], 10) : 1
+      })(),
       total_cost: totalCost,
       cost_per_ml: volTotal > 0 ? totalCost / volTotal : 0
     }
