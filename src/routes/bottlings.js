@@ -32,6 +32,7 @@ router.get('/stock-summary', ctrl.stockSummary)
 router.get('/available-batches', ctrl.getAvailableBatches)
 router.get('/in-maceration', ctrl.getBatchesInMaceration)
 router.get('/gifts-available', ctrl.getAvailableGifts)
+router.get('/ready-by-volume', ctrl.readyByVolume)
 router.get('/:id/orders', [param('id').isInt()], validate, ctrl.getOrdersConsumingBottling)
 // Vínculo lote↔envase (reconciliação histórica, sem abate) — Fase 2
 router.get('/:id/candidate-batches', [param('id').isInt()], validate, ctrl.getCandidateBatches)

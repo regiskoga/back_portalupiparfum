@@ -651,6 +651,41 @@ async function getAvailableGifts (req, res) {
   }
 }
 
+// ─── PRODUTO ACABADO POR VOLUME ───────────────────────────────────────────────
+// Envases PRONTOS (produto acabado) de um produto, agrupados por volume — para o
+// popup "ver por volume" no lançamento do pedido. Usa a MESMA junção do selo
+// (products.sku = bottlings.product_ref, type='normal', ativo, quantity_available>0),
+// então o total aqui bate com o "Produto acabado: N envases".
+async function readyByVolume (req, res) {
+  try {
+    const productId = parseInt(req.query.product_id)
+    if (!productId) return res.status(400).json({ error: 'product_id é obrigatório' })
+
+    const rows = await db('products as p')
+      .join('bottlings as b', 'b.product_ref', 'p.sku')
+      .where('p.id', productId)
+      .where('b.type', 'normal')
+      .where('b.active', true)
+      .where('b.quantity_available', '>', 0)
+      .whereNotNull('p.sku').where('p.sku', '<>', '')
+      .groupBy('b.volume_ml')
+      .select('b.volume_ml')
+      .sum('b.quantity_available as quantity')
+      .count('b.id as lots')
+      .orderBy('b.volume_ml', 'asc')
+
+    const by_volume = rows.map(r => ({
+      volume_ml: parseFloat(r.volume_ml),
+      quantity:  parseInt(r.quantity) || 0,
+      lots:      parseInt(r.lots) || 0,
+    }))
+    const total = by_volume.reduce((s, r) => s + r.quantity, 0)
+    res.json({ product_id: productId, total, by_volume })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
 // ─── GET ORDERS THAT CONSUMED A BOTTLING (Reverse Logistics) ──────────────────
 // Retorna a lista de pedidos/clientes que consumiram um envase específico.
 // Inclui vínculos legados via order_items.bottling_id e os novos via order_item_bottlings.
@@ -898,6 +933,7 @@ module.exports = {
   stockSummary,
   getOrdersConsumingBottling,
   getAvailableGifts,
+  readyByVolume,
   getCandidateBatches,
   linkBatch,
   unlinkBatch
