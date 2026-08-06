@@ -888,10 +888,16 @@ async function processClientes (trx, rows, dryRun) {
       tax_id: toString(getCol(r, 'CPF/CNPJ', 'CPF', 'CNPJ')),
       phone: toString(getCol(r, 'Telefone')),
       email: toString(getCol(r, 'Email')),
-      address: toString(getCol(r, 'Endereço', 'Endereco')),
+      street: toString(getCol(r, 'Rua', 'Rua/Avenida', 'Logradouro', 'Endereço', 'Endereco')),
+      street_number: toString(getCol(r, 'Número', 'Numero', 'Nº', 'No')),
+      complement: toString(getCol(r, 'Complemento')),
+      neighborhood: toString(getCol(r, 'Bairro')),
       city: toString(getCol(r, 'Cidade')),
-      state: toString(getCol(r, 'UF')),
+      state: toString(getCol(r, 'UF', 'Estado')),
       zip_code: toString(getCol(r, 'CEP')),
+      country: toString(getCol(r, 'País', 'Pais')) || 'Brasil',
+      contact_reference: toString(getCol(r, 'Referência do contato', 'Referencia do contato', 'Referência', 'Referencia')),
+      residence_reference: toString(getCol(r, 'Ponto de referência', 'Ponto de referencia', 'Ponto de Referência')),
       notes: toString(getCol(r, 'Observações', 'Observacoes'))
     }
     const existing = await trx('customers').whereRaw('LOWER(name) = ?', nome.toLowerCase()).first()

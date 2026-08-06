@@ -115,7 +115,12 @@ async function getOne (req, res) {
 // ─── CREATE ───────────────────────────────────────────────────────────────────
 async function create (req, res) {
   try {
-    const { name, tax_id = '', phone = '', email = '', address = '', city = '', state = '', zip_code = '', notes = '' } = req.body
+    const {
+      name, tax_id = '', phone = '', email = '', address = '',
+      city = '', state = '', zip_code = '', notes = '',
+      street = '', street_number = '', complement = '', neighborhood = '',
+      country = 'Brasil', contact_reference = '', residence_reference = ''
+    } = req.body
 
     const [result] = await db('customers').insert({
       name,
@@ -126,7 +131,14 @@ async function create (req, res) {
       city,
       state,
       zip_code,
-      notes
+      notes,
+      street,
+      street_number,
+      complement,
+      neighborhood,
+      country,
+      contact_reference,
+      residence_reference
     }).returning('*')
 
     const customer = await customerWithStats(result.id)
@@ -144,7 +156,11 @@ async function update (req, res) {
       return res.status(404).json({ error: 'Customer not found' })
     }
 
-    const { name, tax_id, phone, email, address, city, state, zip_code, notes } = req.body
+    const {
+      name, tax_id, phone, email, address, city, state, zip_code, notes,
+      street, street_number, complement, neighborhood, country,
+      contact_reference, residence_reference
+    } = req.body
 
     const updateData = {}
     if (name !== undefined) updateData.name = name
@@ -156,6 +172,13 @@ async function update (req, res) {
     if (state !== undefined) updateData.state = state
     if (zip_code !== undefined) updateData.zip_code = zip_code
     if (notes !== undefined) updateData.notes = notes
+    if (street !== undefined) updateData.street = street
+    if (street_number !== undefined) updateData.street_number = street_number
+    if (complement !== undefined) updateData.complement = complement
+    if (neighborhood !== undefined) updateData.neighborhood = neighborhood
+    if (country !== undefined) updateData.country = country
+    if (contact_reference !== undefined) updateData.contact_reference = contact_reference
+    if (residence_reference !== undefined) updateData.residence_reference = residence_reference
     updateData.updated_at = db.fn.now()
 
     await db('customers').where({ id: parseInt(req.params.id) }).update(updateData)
