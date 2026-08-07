@@ -3,9 +3,18 @@ const ctrl   = require('../controllers/clientesController')
 const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
 
+// IMPORTANTE: chains do express-validator são MUTÁVEIS. Antes o PATCH fazia
+// `customerRules.map(r => r.optional())`, o que mutava as MESMAS chains do POST
+// (email deixava de pular "" → cadastro só-nome quebrava com "Email inválido").
+// Por isso o create e o update têm arrays independentes.
 const customerRules = [
-  body('name').trim().notEmpty().withMessage('Name is required'),
-  body('email').optional({ checkFalsy: true }).isEmail().withMessage('Invalid email'),
+  body('name').trim().notEmpty().withMessage('Nome é obrigatório'),
+  body('email').optional({ values: 'falsy' }).isEmail().withMessage('Email inválido'),
+]
+
+const customerUpdateRules = [
+  body('name').optional().trim().notEmpty().withMessage('Nome não pode ficar vazio'),
+  body('email').optional({ values: 'falsy' }).isEmail().withMessage('Email inválido'),
 ]
 
 const orderRules = [
@@ -22,7 +31,7 @@ router.get   ('/stats',  ctrl.stats)
 router.get   ('/',       ctrl.list)
 router.get   ('/:id',    [param('id').isInt()], validate, ctrl.getOne)
 router.post  ('/',       customerRules, validate, ctrl.create)
-router.patch ('/:id',    [param('id').isInt(), ...customerRules.map(r => r.optional())], validate, ctrl.update)
+router.patch ('/:id',    [param('id').isInt(), ...customerUpdateRules], validate, ctrl.update)
 router.delete('/:id',    [param('id').isInt()], validate, ctrl.remove)
 
 // ─── Orders (nested under customer) ───────────────────────────────────────────
