@@ -74,7 +74,7 @@ async function list(req, res) {
         .join('batches as b', 'b.id', 'bb.batch_id')
         .join('formulas as f', 'f.id', 'b.formula_id')
         .leftJoin('products as p', 'p.id', 'b.product_id')
-        .select('bb.*', 'b.batch_code', 'b.cost_per_ml', 'f.name as formula_name', 'p.project_name')
+        .select('bb.*', 'b.batch_code', 'b.reduced_lot_number', 'b.cost_per_ml', 'f.name as formula_name', 'p.project_name')
         .whereIn('bb.bottling_id', bottlingIds)
 
       const batchesByBottling = {}
