@@ -73,6 +73,50 @@ async function getReadyBottlingsByProduct (productIds) {
 exports.getReadyBottlingsByProduct = getReadyBottlingsByProduct
 
 /**
+ * Comissão de parceiro (Fase 2) — sincroniza o livro-razão quando o cupom do
+ * pedido é anexado/trocado/removido FORA do create (via applyCoupon). Mantém no
+ * máximo 1 linha por pedido (UNIQUE order_id): faz upsert se o cupom tem parceiro
+ * e comissão > 0, senão apaga a linha (cupom removido ou sem parceiro). Chamado
+ * só com pedido Pendente/Confirmado (pré-realização), por isso pode substituir.
+ * Base = perfumes − desconto − cupom (SEM frete). @param conn trx ou db.
+ */
+async function syncOrderCommission (order, coupon, subtotal, couponDiscount, conn = db) {
+  if (!coupon || !coupon.partner_id) {
+    await conn('partner_commissions').where({ order_id: order.id }).del()
+    return
+  }
+  const partner = await conn('partners').where({ id: coupon.partner_id }).first()
+  const rate = coupon.commission_rate != null
+    ? Number(coupon.commission_rate)
+    : Number(partner?.default_commission_rate || 0)
+  const base = Math.max(0, subtotal - Number(order.discount || 0) - couponDiscount)
+  const amount = Math.round(base * rate) / 100
+
+  if (rate <= 0 || amount <= 0) {
+    await conn('partner_commissions').where({ order_id: order.id }).del()
+    return
+  }
+
+  const competence = new Date(order.created_at).toISOString().slice(0, 7) // YYYY-MM
+  await conn('partner_commissions')
+    .insert({
+      partner_id: coupon.partner_id,
+      coupon_id: coupon.id,
+      order_id: order.id,
+      base_amount: base,
+      rate,
+      amount,
+      status: 'aprovado',
+      competence,
+      reversed_at: null,
+      reversal_reason: null,
+      updated_at: conn.fn.now(),
+    })
+    .onConflict('order_id')
+    .merge()
+}
+
+/**
  * ③ Fila de produção: pedidos CONFIRMADOS (aguardando) e EM PRODUÇÃO (em
  * andamento), do mais antigo ao mais recente, já com seus itens (perfumes) e o
  * saldo de envases prontos por produto — para acompanhar produção sem abrir
@@ -448,6 +492,11 @@ exports.create = async (req, res) => {
       await trx('coupons')
         .where({ id: coupon.id })
         .increment('current_uses', 1)
+
+      // ── Comissão de parceiro (Fase 2) ────────────────────────────────────
+      // Se o cupom pertence a um parceiro, credita a comissão no livro-razão
+      // (mesmo helper usado pelo applyCoupon, dentro da trx). Estorno no cancelamento.
+      await syncOrderCommission(order, coupon, subtotal, couponDiscount, trx)
     }
 
     // Atualizar pedido com prazo e desconto do cupom
@@ -646,6 +695,24 @@ exports.updateStatus = async (req, res) => {
               [parseInt(g.quantity), g.bottling_id]
             )
           }
+        }
+
+        // ── Comissão de parceiro (Fase 2): estorna ao cancelar, reverte ao reabrir.
+        //    Gateado pela transição + filtro de status = idempotente num re-cancel.
+        if (enteringCancelled) {
+          await trx('partner_commissions').where({ order_id: id, status: 'aprovado' }).update({
+            status: 'estornado',
+            reversed_at: trx.fn.now(),
+            reversal_reason: (cancellation_reason || 'Pedido cancelado').trim(),
+            updated_at: trx.fn.now(),
+          })
+        } else {
+          await trx('partner_commissions').where({ order_id: id, status: 'estornado' }).update({
+            status: 'aprovado',
+            reversed_at: null,
+            reversal_reason: null,
+            updated_at: trx.fn.now(),
+          })
         }
       }
 
@@ -987,6 +1054,8 @@ exports.applyCoupon = async (req, res) => {
       const [updated] = await db('orders').where({ id })
         .update({ coupon_id: null, coupon_discount: 0, updated_at: db.fn.now() })
         .returning('*')
+      // Sem cupom → remove qualquer comissão de parceiro do pedido
+      await syncOrderCommission(order, null, 0, 0)
       return res.json({ ...updated, coupon_discount: 0 })
     }
 
@@ -1042,6 +1111,9 @@ exports.applyCoupon = async (req, res) => {
       .returning('*')
 
     await db('coupons').where({ id: coupon.id }).increment('current_uses', 1)
+
+    // Cupom aplicado/trocado pós-criação → sincroniza a comissão do parceiro
+    await syncOrderCommission(order, coupon, subtotal, couponDiscount)
 
     res.json({ ...updated, coupon_code: coupon.code, coupon_type: coupon.type, coupon_discount: couponDiscount })
   } catch (error) {

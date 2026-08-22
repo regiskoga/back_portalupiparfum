@@ -31,6 +31,7 @@ router.get   ('/stats',  ctrl.stats)
 router.get   ('/',       ctrl.list)
 router.get   ('/:id',    [param('id').isInt()], validate, ctrl.getOne)
 router.post  ('/',       customerRules, validate, ctrl.create)
+router.patch ('/:id/reativar', [param('id').isInt()], validate, ctrl.reativar)
 router.patch ('/:id',    [param('id').isInt(), ...customerUpdateRules], validate, ctrl.update)
 router.delete('/:id',    [param('id').isInt()], validate, ctrl.remove)
 

@@ -129,7 +129,9 @@ exports.create = async (req, res) => {
       max_uses = null,
       active = true,
       valid_from = null,
-      valid_until = null
+      valid_until = null,
+      partner_id = null,
+      commission_rate = null
     } = req.body
 
     // Verificar se código já existe
@@ -153,7 +155,9 @@ exports.create = async (req, res) => {
         max_uses,
         active,
         valid_from: valid_from || db.fn.now(),
-        valid_until
+        valid_until,
+        partner_id: partner_id || null,
+        commission_rate: commission_rate === '' || commission_rate === undefined ? null : commission_rate
       })
       .returning('*')
 
@@ -181,7 +185,9 @@ exports.update = async (req, res) => {
       max_uses,
       active,
       valid_from,
-      valid_until
+      valid_until,
+      partner_id,
+      commission_rate
     } = req.body
 
     // Se mudou o código, verificar se já existe
@@ -196,21 +202,41 @@ exports.update = async (req, res) => {
       }
     }
 
+    // G1: bloquear reatribuição de cupom já vinculado a OUTRO parceiro (evita
+    // comissão ambígua). Desvincular (partner_id=null) é livre; force explícito libera.
+    if (partner_id) {
+      const current = await db('coupons').where({ id }).first()
+      if (!current) return res.status(404).json({ error: 'Coupon not found' })
+      if (current.partner_id && Number(current.partner_id) !== Number(partner_id) && !req.body.force) {
+        return res.status(409).json({
+          error: 'Este cupom já pertence a outro parceiro. Desvincule primeiro ou confirme a transferência.',
+          code: 'COUPON_PARTNER_CONFLICT'
+        })
+      }
+    }
+
+    // Monta só os campos enviados (PATCH parcial) — evita zerar o que não veio
+    const updateData = {
+      code: code?.toUpperCase(),
+      description,
+      type,
+      discount_value,
+      min_items,
+      free_items,
+      min_order_value,
+      max_uses,
+      active,
+      valid_from,
+      valid_until
+    }
+    if (partner_id !== undefined) updateData.partner_id = partner_id || null
+    if (commission_rate !== undefined) {
+      updateData.commission_rate = commission_rate === '' || commission_rate === null ? null : commission_rate
+    }
+
     const [coupon] = await db('coupons')
       .where({ id })
-      .update({
-        code: code?.toUpperCase(),
-        description,
-        type,
-        discount_value,
-        min_items,
-        free_items,
-        min_order_value,
-        max_uses,
-        active,
-        valid_from,
-        valid_until
-      })
+      .update(updateData)
       .returning('*')
 
     if (!coupon) {
@@ -242,6 +268,12 @@ exports.delete = async (req, res) => {
     res.json({ message: 'Coupon deleted successfully' })
   } catch (error) {
     console.error('Error deleting coupon:', error)
+    // G6: violação de FK (comissões de parceiro apontam p/ este cupom, RESTRICT)
+    if (error.code === '23503') {
+      return res.status(409).json({
+        error: 'Não é possível excluir: este cupom tem comissões de parceiro vinculadas. Desative-o (Ativo = não) em vez de excluir.'
+      })
+    }
     res.status(500).json({ error: 'Failed to delete coupon' })
   }
 }

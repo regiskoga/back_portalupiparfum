@@ -32,7 +32,7 @@ async function customerWithStats (id) {
 // ─── LIST ─────────────────────────────────────────────────────────────────────
 async function list (req, res) {
   try {
-    const { busca, page = 1, limit = 20, ordem = 'name', dir = 'ASC' } = req.query
+    const { busca, page = 1, limit = 20, ordem = 'name', dir = 'ASC', incluir_inativos } = req.query
 
     const offset = (Math.max(1, Number(page)) - 1) * Number(limit)
 
@@ -44,6 +44,11 @@ async function list (req, res) {
       .select(db.raw("COUNT(CASE WHEN o.status <> 'Cancelled' THEN o.id END) as total_orders"))
       .max('o.created_at as last_order')
       .groupBy('c.id')
+
+    // Soft-delete: por padrão só mostra clientes ativos
+    if (!incluir_inativos) {
+      query = query.where('c.active', true)
+    }
 
     // Apply search filter
     if (busca) {
@@ -57,6 +62,9 @@ async function list (req, res) {
 
     // Count total
     const countQuery = db('customers as c')
+    if (!incluir_inativos) {
+      countQuery.where('c.active', true)
+    }
     if (busca) {
       countQuery.where(function() {
         this.where('c.name', 'like', `%${busca}%`)
@@ -190,7 +198,9 @@ async function update (req, res) {
   }
 }
 
-// ─── DELETE ───────────────────────────────────────────────────────────────────
+// ─── INATIVAR (soft delete) ───────────────────────────────────────────────────
+// Nunca apaga fisicamente: a FK customers→orders é CASCADE e o histórico de
+// pedidos é base do financeiro (comissão de parceiros) e da rastreabilidade.
 async function remove (req, res) {
   try {
     const customer = await db('customers').where({ id: parseInt(req.params.id) }).first()
@@ -198,14 +208,32 @@ async function remove (req, res) {
       return res.status(404).json({ error: 'Customer not found' })
     }
 
-    // occurrences.order_id tem RESTRICT — precisa deletar antes do cascade de orders
-    const orderIds = await db('orders').where({ customer_id: parseInt(req.params.id) }).pluck('id')
-    if (orderIds.length > 0) {
-      await db('occurrences').whereIn('order_id', orderIds).del()
+    await db('customers').where({ id: parseInt(req.params.id) }).update({
+      active: false,
+      updated_at: db.fn.now(),
+    })
+
+    res.json({ message: 'Customer deactivated' })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
+// ─── REATIVAR ─────────────────────────────────────────────────────────────────
+async function reativar (req, res) {
+  try {
+    const customer = await db('customers').where({ id: parseInt(req.params.id) }).first()
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' })
     }
 
-    await db('customers').where({ id: parseInt(req.params.id) }).del()
-    res.json({ message: 'Customer removed' })
+    await db('customers').where({ id: parseInt(req.params.id) }).update({
+      active: true,
+      updated_at: db.fn.now(),
+    })
+
+    const updated = await customerWithStats(req.params.id)
+    res.json(updated)
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -468,6 +496,6 @@ async function deleteOrder (req, res) {
 }
 
 module.exports = {
-  list, getOne, create, update, remove, stats,
+  list, getOne, create, update, remove, reativar, stats,
   listOrders, getOrder, createOrder, updateOrder, deleteOrder,
 }

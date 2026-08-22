@@ -59,7 +59,9 @@ router.post(
     body('description').optional().isString(),
     body('active').optional().isBoolean(),
     body('valid_from').optional({ nullable: true }).isISO8601(),
-    body('valid_until').optional({ nullable: true }).isISO8601()
+    body('valid_until').optional({ nullable: true }).isISO8601(),
+    body('partner_id').optional({ nullable: true }).isInt({ min: 1 }),
+    body('commission_rate').optional({ nullable: true }).isFloat({ min: 0, max: 100 })
   ],
   validate,
   couponsController.create
@@ -85,7 +87,9 @@ router.patch(
     body('description').optional().isString(),
     body('active').optional().isBoolean(),
     body('valid_from').optional({ nullable: true }).isISO8601(),
-    body('valid_until').optional({ nullable: true }).isISO8601()
+    body('valid_until').optional({ nullable: true }).isISO8601(),
+    body('partner_id').optional({ nullable: true }).isInt({ min: 1 }),
+    body('commission_rate').optional({ nullable: true }).isFloat({ min: 0, max: 100 })
   ],
   validate,
   couponsController.update
