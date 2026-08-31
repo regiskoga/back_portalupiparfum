@@ -776,7 +776,14 @@ async function processEnvases (trx, rows, dryRun) {
       volume = 1
       errors.push({ row: r._row, msg: 'Volume (ml) em branco — usando 1 como placeholder' })
     }
-    const qtdProd = toNumber(getCol(r, 'Qtd Produzida')) ?? 1
+    // Qtd Produzida alimenta a coluna `quantity`, que tem CHECK (quantity > 0)
+    // no banco. Sem este guard, 0/negativo/branco derrubava o import inteiro com
+    // erro cru de SQL ("bottlings_quantity_check"). Espelha o tratamento do volume.
+    let qtdProd = toNumber(getCol(r, 'Qtd Produzida'))
+    if (qtdProd == null || qtdProd <= 0) {
+      qtdProd = 1
+      errors.push({ row: r._row, msg: 'Qtd Produzida em branco ou ≤ 0 — usando 1 como placeholder' })
+    }
 
     if (dryRun) { ok++; continue }
 
@@ -830,7 +837,8 @@ async function processEnvases (trx, rows, dryRun) {
     let tipo = toString(getCol(r, 'Tipo (normal/brinde)', 'Tipo')).toLowerCase() || 'normal'
     if (!VALID_BOTTLING_TYPES.includes(tipo)) tipo = 'normal'
 
-    const qtdAvail = toNumber(getCol(r, 'Qtd Disponível', 'Qtd Disponivel')) ?? qtdProd
+    let qtdAvail = toNumber(getCol(r, 'Qtd Disponível', 'Qtd Disponivel')) ?? qtdProd
+    if (qtdAvail < 0) qtdAvail = 0 // sem constraint no banco, mas estoque negativo é inválido
     const productName = product ? (product.commercial_name || product.project_name) : (projetoNome || 'Sem nome')
 
     const data = {
