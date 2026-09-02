@@ -113,6 +113,23 @@ router.post(
 )
 
 /**
+ * POST /api/orders/:orderId/items
+ * Adiciona um novo item ao pedido (somente quando Pending / pré-pedido)
+ */
+router.post(
+  '/:orderId/items',
+  [
+    param('orderId').isInt(),
+    body('product_id').isInt({ min: 1 }).withMessage('product_id must be a valid integer'),
+    body('volume_ml').isFloat({ gt: 0 }).withMessage('volume_ml must be greater than 0'),
+    body('quantity').isInt({ min: 1 }).withMessage('quantity must be at least 1'),
+    body('unit_price').isFloat({ min: 0 }).withMessage('unit_price must be >= 0'),
+  ],
+  validate,
+  ordersController.addItem
+)
+
+/**
  * PATCH /api/orders/:orderId/items/:itemId
  * Edita um item do pedido (somente quando Pending ou Confirmed)
  */
@@ -128,6 +145,20 @@ router.patch(
   ],
   validate,
   ordersController.updateItem
+)
+
+/**
+ * DELETE /api/orders/:orderId/items/:itemId
+ * Remove um item do pedido (somente quando Pending / pré-pedido)
+ */
+router.delete(
+  '/:orderId/items/:itemId',
+  [
+    param('orderId').isInt(),
+    param('itemId').isInt(),
+  ],
+  validate,
+  ordersController.removeItem
 )
 
 /**

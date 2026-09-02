@@ -117,6 +117,64 @@ async function syncOrderCommission (order, coupon, subtotal, couponDiscount, con
 }
 
 /**
+ * Calcula o desconto de um cupom sobre uma lista de itens do pedido.
+ * Extraído do fluxo de create/applyCoupon para ser reusado ao editar itens
+ * (o desconto de cupons percentuais/progressivos depende do subtotal).
+ * NÃO valida min_order_value nem incrementa uso — isso fica em applyCoupon/create.
+ */
+function computeCouponDiscount (coupon, items) {
+  const subtotal = items.reduce((s, i) => s + parseFloat(i.unit_price || 0) * parseInt(i.quantity || 0), 0)
+  const minOrderValue = parseFloat(coupon.min_order_value || 0)
+  switch (coupon.type) {
+    case 'Percentage':
+      return (subtotal * coupon.discount_value) / 100
+    case 'Fixed Amount':
+      return parseFloat(coupon.discount_value)
+    case 'Progressive': {
+      const excessAmount = Math.max(0, subtotal - minOrderValue)
+      return (excessAmount * coupon.discount_value) / 100
+    }
+    case 'Buy X Get Y': {
+      const totalQty = items.reduce((s, i) => s + parseInt(i.quantity || 0), 0)
+      if (totalQty >= coupon.min_items) {
+        const free   = Math.floor(totalQty / coupon.min_items) * coupon.free_items
+        const avgPrc = totalQty > 0 ? subtotal / totalQty : 0
+        return free * avgPrc
+      }
+      return 0
+    }
+    default:
+      return 0
+  }
+}
+
+/**
+ * Recalcula desconto de cupom + comissão de parceiro de um pedido a partir dos
+ * itens atuais. Chamado após editar/adicionar/remover itens (GAP G2) para manter
+ * o total exibido e a base da comissão coerentes. Subtotal = unit_price × qtd,
+ * SEM item_discount (mesma regra do resumo e da tela de detalhes).
+ */
+async function recalcOrderCommission (orderId, conn = db) {
+  const order = await conn('orders').where({ id: orderId }).first()
+  if (!order) return
+  const items    = await conn('order_items').where({ order_id: orderId })
+  const subtotal = items.reduce((s, i) => s + parseFloat(i.unit_price || 0) * parseInt(i.quantity || 0), 0)
+
+  let coupon = null
+  let couponDiscount = 0
+  if (order.coupon_id) {
+    coupon = await conn('coupons').where({ id: order.coupon_id }).first()
+    if (coupon) {
+      couponDiscount = computeCouponDiscount(coupon, items)
+      await conn('orders').where({ id: orderId })
+        .update({ coupon_discount: couponDiscount, updated_at: conn.fn.now() })
+    }
+  }
+
+  await syncOrderCommission(order, coupon, subtotal, couponDiscount, conn)
+}
+
+/**
  * ③ Fila de produção: pedidos CONFIRMADOS (aguardando) e EM PRODUÇÃO (em
  * andamento), do mais antigo ao mais recente, já com seus itens (perfumes) e o
  * saldo de envases prontos por produto — para acompanhar produção sem abrir
@@ -838,6 +896,9 @@ exports.updateItem = async (req, res) => {
       .update(updateData)
       .returning('*')
 
+    // GAP G2: editar item muda o subtotal → recalcula cupom + comissão do parceiro.
+    await recalcOrderCommission(orderId)
+
     await activityLogger.log('order_updated', 'order', orderId, {
       description: `Item ${itemId} do pedido ${order.code} atualizado`,
     })
@@ -1081,30 +1142,7 @@ exports.applyCoupon = async (req, res) => {
       return res.status(400).json({ error: `Valor mínimo do pedido para este cupom: R$ ${minOrderValue.toFixed(2)}` })
     }
 
-    let couponDiscount = 0
-    switch (coupon.type) {
-      case 'Percentage':
-        couponDiscount = (subtotal * coupon.discount_value) / 100
-        break
-      case 'Fixed Amount':
-        couponDiscount = parseFloat(coupon.discount_value)
-        break
-      case 'Progressive': {
-        // Aplica desconto somente sobre a parte que excede o valor mínimo
-        const excessAmount = Math.max(0, subtotal - minOrderValue)
-        couponDiscount = (excessAmount * coupon.discount_value) / 100
-        break
-      }
-      case 'Buy X Get Y': {
-        const totalQty = items.reduce((s, i) => s + parseInt(i.quantity), 0)
-        if (totalQty >= coupon.min_items) {
-          const free    = Math.floor(totalQty / coupon.min_items) * coupon.free_items
-          const avgPrc  = totalQty > 0 ? subtotal / totalQty : 0
-          couponDiscount = free * avgPrc
-        }
-        break
-      }
-    }
+    const couponDiscount = computeCouponDiscount(coupon, items)
 
     const [updated] = await db('orders').where({ id })
       .update({ coupon_id: coupon.id, coupon_discount: couponDiscount, updated_at: db.fn.now() })
@@ -1155,6 +1193,112 @@ exports.updateFreight = async (req, res) => {
     res.json(updated)
   } catch (error) {
     console.error('Error updating order freight:', error)
+    res.status(500).json({ error: error.message })
+  }
+}
+
+/**
+ * Adiciona um novo item a um pedido existente — somente enquanto Pendente
+ * (pré-pedido). Em Pending o estoque ainda não foi decrementado, então basta
+ * inserir o item, rodar o motor de decisão (como no create) e recalcular a
+ * comissão. Mesma estrutura de insert do create() para não deixar item "órfão".
+ */
+exports.addItem = async (req, res) => {
+  const trx = await db.transaction()
+  try {
+    const { orderId } = req.params
+    const { product_id, volume_ml, quantity, unit_price, item_discount = 0 } = req.body
+
+    const order = await trx('orders').where({ id: orderId }).first()
+    if (!order) { await trx.rollback(); return res.status(404).json({ error: 'Order not found' }) }
+    // Só em Pending E com estoque ainda não reservado. Um pedido regredido de
+    // Confirmado tem o estoque restaurado (stock_decremented=false) — a checagem
+    // extra é blindagem contra qualquer caminho que deixe Pending decrementado.
+    if (order.status !== 'Pending' || order.stock_decremented) {
+      await trx.rollback()
+      return res.status(400).json({ error: 'Só é possível adicionar itens enquanto o pedido está Pendente (sem estoque reservado)' })
+    }
+
+    const decision = await orderDecisionEngine.executeDecision({ product_id, volume_ml, quantity })
+
+    const [orderItem] = await trx('order_items')
+      .insert({
+        order_id: order.id,
+        product_id,
+        product_name: req.body.product_name || '',
+        product_ref: req.body.product_ref || '',
+        volume_ml,
+        quantity,
+        unit_price,
+        item_discount: parseFloat(item_discount) || 0,
+        decision_status: decision.status,
+        estimated_days: decision.estimatedDays,
+        decision_notes: decision.notes,
+      })
+      .returning('*')
+
+    await orderDecisionEngine.createAutomaticOrders(order.id, orderItem.id, decision.actions, trx)
+
+    await recalcOrderCommission(order.id, trx)
+
+    await activityLogger.log('order_updated', 'order', order.id, {
+      description: `Item adicionado ao pedido ${order.code}`,
+    })
+
+    await trx.commit()
+    events.broadcast('orders-changed', { id: parseInt(orderId), action: 'item-added' })
+    res.status(201).json(orderItem)
+  } catch (error) {
+    await trx.rollback()
+    console.error('Error adding order item:', error)
+    res.status(500).json({ error: 'Failed to add order item' })
+  }
+}
+
+/**
+ * Remove um item de um pedido — somente enquanto Pendente. Bloqueia remover o
+ * último item (pedido precisa ter ≥1). Vínculos de envase e ordens automáticas
+ * do item caem por CASCADE; recalcula cupom + comissão ao final.
+ */
+exports.removeItem = async (req, res) => {
+  const trx = await db.transaction()
+  try {
+    const { orderId, itemId } = req.params
+
+    const order = await trx('orders').where({ id: orderId }).first()
+    if (!order) { await trx.rollback(); return res.status(404).json({ error: 'Order not found' }) }
+    // Só em Pending E sem estoque reservado (ver nota em addItem).
+    if (order.status !== 'Pending' || order.stock_decremented) {
+      await trx.rollback()
+      return res.status(400).json({ error: 'Só é possível remover itens enquanto o pedido está Pendente (sem estoque reservado)' })
+    }
+
+    const item = await trx('order_items').where({ id: itemId, order_id: orderId }).first()
+    if (!item) { await trx.rollback(); return res.status(404).json({ error: 'Item not found' }) }
+
+    const { c } = await trx('order_items').where({ order_id: orderId }).count('* as c').first()
+    if (parseInt(c) <= 1) {
+      await trx.rollback()
+      return res.status(400).json({ error: 'O pedido precisa ter pelo menos um item' })
+    }
+
+    // Vínculos de envase (defensivo — não deve haver em Pending); ordens
+    // automáticas caem por onDelete CASCADE ao deletar o item.
+    await trx('order_item_bottlings').where({ order_item_id: itemId }).del()
+    await trx('order_items').where({ id: itemId }).del()
+
+    await recalcOrderCommission(order.id, trx)
+
+    await activityLogger.log('order_updated', 'order', order.id, {
+      description: `Item removido do pedido ${order.code}`,
+    })
+
+    await trx.commit()
+    events.broadcast('orders-changed', { id: parseInt(orderId), action: 'item-removed' })
+    res.json({ success: true })
+  } catch (error) {
+    await trx.rollback()
+    console.error('Error removing order item:', error)
     res.status(500).json({ error: error.message })
   }
 }
