@@ -32,12 +32,14 @@ function buildMacerationInfo (batch, macerationDays, today) {
 }
 
 // ─── GENERATE BATCH CODE ──────────────────────────────────────────────────────
-// Formato: L_PPPPP_FFFFF_YYYYMMDD_N  (N vem de getNextReducedLotNumber — nunca recalculado aqui)
-function generateBatchCode (product_id, formula_id, production_date, N) {
+// Formato: L_PPPPP_FFFFF_LLLL_YYYYMMDD_N  (N vem de getNextReducedLotNumber — nunca recalculado aqui)
+// LLLL = laboratório = id do fornecedor da 1ª essência do lote (4 dígitos). 0000 = sem essência.
+function generateBatchCode (product_id, formula_id, lab_id, production_date, N) {
   const paddedProject = String(product_id || 0).padStart(5, '0')
   const paddedFormula = String(formula_id || 0).padStart(5, '0')
+  const paddedLab     = String(lab_id || 0).padStart(4, '0')
   const datePart = (production_date || new Date().toISOString().slice(0, 10)).replace(/-/g, '')
-  return `L_${paddedProject}_${paddedFormula}_${datePart}_${N}`
+  return `L_${paddedProject}_${paddedFormula}_${paddedLab}_${datePart}_${N}`
 }
 
 // ─── REDUCED LOT NUMBER ───────────────────────────────────────────────────────
@@ -248,12 +250,16 @@ async function create(req, res) {
 
     // Validar e calcular custo das essências (batch lookup)
     let essenceCost = 0
+    let labId = 0   // laboratório = fornecedor da 1ª essência (para o código do lote)
     if (essences.length > 0) {
       const essenceIds = [...new Set(essences.map(e => parseInt(e.supply_id)))]
       const suppliesMap = await db('supplies')
         .whereIn('id', essenceIds)
-        .select('id', 'name', 'unit', 'unit_cost', 'quantity_available', 'is_open')
+        .select('id', 'name', 'unit', 'unit_cost', 'quantity_available', 'is_open', 'supplier_id')
         .then(rows => Object.fromEntries(rows.map(r => [r.id, r])))
+
+      // Lab = fornecedor da PRIMEIRA essência informada (a principal).
+      labId = suppliesMap[parseInt(essences[0].supply_id)]?.supplier_id || 0
 
       // Agrupa total por supply_id — mesma essência duas vezes soma antes de validar
       const neededBySupply = {}
@@ -291,6 +297,7 @@ async function create(req, res) {
     const batch_code = providedCode?.trim() || generateBatchCode(
       product_id ? parseInt(product_id) : 0,
       parseInt(formula_id),
+      labId,
       production_date,
       reduced_lot_number
     )
@@ -687,11 +694,12 @@ async function mergeBatches (req, res) {
 
 async function nextCode (req, res) {
   try {
-    const { product_id, formula_id, production_date } = req.query
+    const { product_id, formula_id, production_date, supplier_id } = req.query
     const reduced_lot_number = await getNextReducedLotNumber(product_id ? parseInt(product_id) : null)
     const code = generateBatchCode(
       product_id ? parseInt(product_id) : 0,
       formula_id ? parseInt(formula_id) : 0,
+      supplier_id ? parseInt(supplier_id) : 0,
       production_date || null,
       reduced_lot_number
     )

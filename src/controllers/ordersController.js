@@ -640,7 +640,7 @@ exports.updateStatus = async (req, res) => {
     const { id } = req.params
     const { status, discount, notes, cancellation_reason, loss_reason } = req.body
 
-    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled', 'Lost']
+    const validStatuses = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled', 'Lost', 'Abandoned']
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid status' })
     }
@@ -661,6 +661,17 @@ exports.updateStatus = async (req, res) => {
       const obs = (loss_reason || '').trim()
       if (!obs) {
         return res.status(400).json({ error: 'Informe a observação da perda/avaria.' })
+      }
+    }
+
+    // ── Trava: Carrinho abandonado só a partir de Pendente + exige motivo ──
+    if (status === 'Abandoned') {
+      if (order.status !== 'Pending') {
+        return res.status(400).json({ error: 'Só é possível abandonar um pedido que está Pendente (carrinho).' })
+      }
+      const reason = (cancellation_reason || '').trim()
+      if (!reason) {
+        return res.status(400).json({ error: 'Informe o motivo do abandono do carrinho.' })
       }
     }
 
@@ -686,8 +697,9 @@ exports.updateStatus = async (req, res) => {
     if (discount !== undefined) updateData.discount = parseFloat(discount) || 0
     if (notes    !== undefined) updateData.notes    = notes
     // Guarda o motivo ao cancelar; limpa se o pedido for reaberto.
-    if (status === 'Cancelled') updateData.cancellation_reason = (cancellation_reason || '').trim()
-    else if (order.status === 'Cancelled') updateData.cancellation_reason = null
+    // Motivo compartilhado por Cancelado e Carrinho abandonado (mesma coluna).
+    if (status === 'Cancelled' || status === 'Abandoned') updateData.cancellation_reason = (cancellation_reason || '').trim()
+    else if (order.status === 'Cancelled' || order.status === 'Abandoned') updateData.cancellation_reason = null
 
     // Guarda a FASE de origem do cancelamento, gateado pela TRANSIÇÃO (entrar em
     // Cancelled captura o status anterior; sair de Cancelled limpa). Não usar
@@ -725,8 +737,8 @@ exports.updateStatus = async (req, res) => {
         updateData.stock_decremented = true
       }
 
-      // ── Cancelamento ou regressão para Pendente: restaurar via junction ──
-      if ((status === 'Cancelled' || status === 'Pending') && order.stock_decremented) {
+      // ── Cancelamento, abandono ou regressão para Pendente: restaurar via junction ──
+      if ((status === 'Cancelled' || status === 'Pending' || status === 'Abandoned') && order.stock_decremented) {
         const itemIds = (await trx('order_items').where({ order_id: id }).select('id')).map(i => i.id)
         const links = itemIds.length > 0 ? await trx('order_item_bottlings').whereIn('order_item_id', itemIds) : []
         for (const link of links) {
@@ -740,8 +752,12 @@ exports.updateStatus = async (req, res) => {
       //    Ao CANCELAR, devolver o estoque dos brindes; ao REABRIR (sair de
       //    Cancelado), debitar de novo. Gateado pela transição de status para
       //    ser idempotente (não restaura/debita duas vezes num re-cancel). ──
-      const enteringCancelled = status === 'Cancelled' && order.status !== 'Cancelled'
-      const leavingCancelled  = order.status === 'Cancelled' && status !== 'Cancelled'
+      // Cancelado e Carrinho abandonado devolvem estoque de brinde e estornam
+      // comissão do mesmo jeito. Gateado pela transição (idempotente): entrar em
+      // qualquer um dos dois restaura; sair para um status "vivo" reverte.
+      const NEG = ['Cancelled', 'Abandoned']
+      const enteringCancelled = NEG.includes(status) && !NEG.includes(order.status)
+      const leavingCancelled  = NEG.includes(order.status) && !NEG.includes(status)
       if (enteringCancelled || leavingCancelled) {
         const gifts = await trx('order_gifts').where({ order_id: id }).select('bottling_id', 'quantity')
         for (const g of gifts) {
@@ -1193,6 +1209,34 @@ exports.updateFreight = async (req, res) => {
     res.json(updated)
   } catch (error) {
     console.error('Error updating order freight:', error)
+    res.status(500).json({ error: error.message })
+  }
+}
+
+/**
+ * Atualiza apenas os comentários/observações do pedido — disponível em qualquer
+ * fase (anotação sem efeito colateral). Vem preenchido ou vazio; pode editar.
+ */
+exports.updateNotes = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { notes } = req.body
+
+    const order = await db('orders').where({ id }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+
+    const [updated] = await db('orders').where({ id })
+      .update({ notes: notes == null ? '' : String(notes), updated_at: db.fn.now() })
+      .returning('*')
+
+    await activityLogger.log('order_updated', 'order', id, {
+      description: `Comentários do pedido ${order.code} atualizados`,
+    })
+
+    events.broadcast('orders-changed', { id: parseInt(id), action: 'notes-updated' })
+    res.json(updated)
+  } catch (error) {
+    console.error('Error updating order notes:', error)
     res.status(500).json({ error: error.message })
   }
 }

@@ -85,7 +85,7 @@ router.patch(
   '/:id/status',
   [
     body('status')
-      .isIn(['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled', 'Lost'])
+      .isIn(['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered', 'Cancelled', 'Lost', 'Abandoned'])
       .withMessage('Invalid status')
   ],
   validate,
@@ -215,6 +215,20 @@ router.patch(
   [param('id').isInt()],
   validate,
   ordersController.registerPayment
+)
+
+/**
+ * PATCH /api/orders/:id/notes
+ * Edita os comentários/observações do pedido (qualquer fase)
+ */
+router.patch(
+  '/:id/notes',
+  [
+    param('id').isInt(),
+    body('notes').optional({ nullable: true }).isString(),
+  ],
+  validate,
+  ordersController.updateNotes
 )
 
 /**
