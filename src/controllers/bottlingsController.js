@@ -6,6 +6,25 @@ async function getParam (key, defaultValue) {
   return row ? row.value : String(defaultValue)
 }
 
+// Recalcula os custos agregados do envase a partir dos lotes vinculados.
+// liquid_cost = soma dos proportional_cost dos bottling_batches (cost_per_ml×ml_used);
+// total_cost = líquido + frasco + rótulo; unit_cost = total / quantidade.
+// Mantém o custo coerente quando o usuário troca o lote de origem por link/unlink.
+async function recalcBottlingCost (trx, bottlingId) {
+  const bt = await trx('bottlings').where('id', bottlingId).first()
+  if (!bt) return
+  const agg = await trx('bottling_batches').where('bottling_id', bottlingId).sum({ liq: 'proportional_cost' })
+  const liquid = parseFloat((agg[0] && agg[0].liq) || 0)
+  const total = liquid + parseFloat(bt.bottle_cost || 0) + parseFloat(bt.label_cost || 0)
+  const qty = parseInt(bt.quantity) || 0
+  await trx('bottlings').where('id', bottlingId).update({
+    liquid_cost: liquid,
+    total_cost: total,
+    unit_cost: qty > 0 ? total / qty : 0,
+    updated_at: trx.fn.now()
+  })
+}
+
 // ─── GENERATE BOTTLING CODE ───────────────────────────────────────────────────
 async function generateBottlingCode () {
   const today = new Date()
@@ -951,6 +970,8 @@ async function linkBatch (req, res) {
         .insert({ bottling_id: bottlingId, batch_id: batchId, ml_used: ml, proportional_cost })
         .returning('*')
 
+      await recalcBottlingCost(trx, bottlingId)
+
       return { row, batch, product, stock_moved }
     })
 
@@ -1009,6 +1030,9 @@ async function unlinkBatch (req, res) {
           restored = applied
         }
       }
+
+      await recalcBottlingCost(trx, bottlingId)
+
       return { restored }
     })
 
