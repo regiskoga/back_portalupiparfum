@@ -2,6 +2,7 @@ const router = require('express').Router()
 const ctrl = require('../controllers/batchesController')
 const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
+const { authenticate } = require('../middleware/auth')
 
 const BATCH_STATUSES = ['Em maceração', 'Pronto para envase', 'Finalizado']
 
@@ -38,5 +39,10 @@ router.put('/:id', [param('id').isInt(), ...updateBatchRules], validate, ctrl.up
 router.patch('/:id', [param('id').isInt(), ...updateBatchRules], validate, ctrl.update)
 router.delete('/:id', [param('id').isInt()], validate, ctrl.remove)
 router.post('/:id/start-maceration', [param('id').isInt()], validate, ctrl.startMaceration)
+router.patch('/:id/adjust-stock', authenticate, [
+  param('id').isInt(),
+  body('remaining_ml').isFloat({ min: 0 }).withMessage('remaining_ml deve ser >= 0'),
+  body('reason').trim().notEmpty().withMessage('Informe o motivo do ajuste')
+], validate, ctrl.adjustStock)
 
 module.exports = router

@@ -856,6 +856,75 @@ module.exports = {
   mergeBatches,
   nextCode,
   stockSummary,
+  adjustStock,
+}
+
+// ─── AJUSTE MANUAL DE ESTOQUE DO LOTE ─────────────────────────────────────────
+// Corrige o remaining_ml de um lote diretamente (ex.: envase lançado no lote
+// errado que já não é mais recuperável pelo vínculo). Grava um batch_movement de
+// 'adjustment' com o motivo. Respeita as constraints do banco (0 <= remaining <=
+// quantity_ml). Permissão de acesso fica para uma fase posterior.
+async function adjustStock (req, res) {
+  try {
+    const batchId = parseInt(req.params.id)
+    const newRemaining = parseFloat(req.body.remaining_ml)
+    const reason = (req.body.reason || '').trim()
+
+    if (isNaN(newRemaining) || newRemaining < 0) {
+      return res.status(400).json({ error: 'remaining_ml inválido (precisa ser um número >= 0).' })
+    }
+    if (!reason) {
+      return res.status(400).json({ error: 'Informe o motivo do ajuste.' })
+    }
+
+    const result = await db.transaction(async (trx) => {
+      const batch = await trx('batches').where('id', batchId).first()
+      if (!batch) { const e = new Error('Lote não encontrado'); e.status = 404; throw e }
+
+      const qtyMl = parseFloat(batch.quantity_ml)
+      if (newRemaining > qtyMl) {
+        const e = new Error(
+          `O saldo não pode exceder o volume produzido do lote (${qtyMl.toFixed(2)}ml). ` +
+          `Se o volume produzido está errado, corrija o lote antes.`
+        )
+        e.status = 400; throw e
+      }
+
+      const prev = parseFloat(batch.remaining_ml)
+      const delta = newRemaining - prev
+      if (delta === 0) {
+        return batch // nada a fazer (movimentação exige quantity_ml != 0)
+      }
+
+      let status = batch.status
+      if (newRemaining <= 0 && batch.status !== 'Em maceração') status = 'Finalizado'
+      else if (newRemaining > 0 && batch.status === 'Finalizado') status = 'Pronto para envase'
+
+      const [updated] = await trx('batches').where('id', batchId).update({
+        remaining_ml: newRemaining,
+        status,
+        updated_at: trx.fn.now()
+      }).returning('*')
+
+      await trx('batch_movements').insert({
+        batch_id: batchId,
+        movement_type: 'adjustment',
+        quantity_ml: delta,
+        previous_ml: prev,
+        current_ml: newRemaining,
+        reference_id: null,
+        reference_type: 'manual',
+        notes: `Ajuste manual de estoque: ${reason}`,
+        operator: (req.user && (req.user.name || req.user.username)) || 'user'
+      })
+
+      return updated
+    })
+
+    res.json(result)
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message })
+  }
 }
 
 

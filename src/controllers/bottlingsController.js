@@ -872,52 +872,149 @@ async function getCandidateBatches (req, res) {
 }
 
 // POST /api/bottlings/:id/candidate-batches  { batch_id, ml_used? }
-// Cria o vínculo em bottling_batches SEM abater remaining_ml.
+// Vincula um lote ao envase. Comportamento depende da NATUREZA do envase:
+//  • Envase REAL (criado via create(), que já moveu estoque — tem movimentação
+//    'bottling') → o novo vínculo DEBITA os ml do lote (corrige o estoque quando o
+//    usuário troca o lote de origem). Espelha exatamente a baixa do create().
+//  • Envase HISTÓRICO (importado em massa, nunca moveu estoque — sem movimentação
+//    'bottling') → vínculo NEUTRO (reconciliação): só registra o vínculo, não abate.
 async function linkBatch (req, res) {
   try {
     const bottlingId = parseInt(req.params.id)
     const batchId = parseInt(req.body.batch_id)
     if (!batchId) return res.status(400).json({ error: 'batch_id é obrigatório' })
 
-    const bottling = await db('bottlings').where('id', bottlingId).first()
-    if (!bottling) return res.status(404).json({ error: 'Envase não encontrado' })
-    const batch = await db('batches').where('id', batchId).first()
-    if (!batch) return res.status(404).json({ error: 'Lote não encontrado' })
+    const out = await db.transaction(async (trx) => {
+      const bottling = await trx('bottlings').where('id', bottlingId).first()
+      if (!bottling) { const e = new Error('Envase não encontrado'); e.status = 404; throw e }
+      const batch = await trx('batches').where('id', batchId).first()
+      if (!batch) { const e = new Error('Lote não encontrado'); e.status = 404; throw e }
 
-    // Segurança: o lote precisa ser do mesmo produto do envase (candidato válido).
-    const product = bottling.product_ref ? await db('products').where('sku', bottling.product_ref).first() : null
-    if (!product || batch.product_id !== product.id) {
-      return res.status(409).json({ error: 'Lote não pertence ao produto deste envase — vínculo recusado.' })
-    }
+      // Segurança: o lote precisa ser do mesmo produto do envase (candidato válido).
+      const product = bottling.product_ref ? await trx('products').where('sku', bottling.product_ref).first() : null
+      if (!product || batch.product_id !== product.id) {
+        const e = new Error('Lote não pertence ao produto deste envase — vínculo recusado.'); e.status = 409; throw e
+      }
 
-    const existing = await db('bottling_batches').where({ bottling_id: bottlingId, batch_id: batchId }).first()
-    if (existing) return res.status(409).json({ error: 'Este lote já está vinculado a este envase.' })
+      const existing = await trx('bottling_batches').where({ bottling_id: bottlingId, batch_id: batchId }).first()
+      if (existing) { const e = new Error('Este lote já está vinculado a este envase.'); e.status = 409; throw e }
 
-    const ml = req.body.ml_used != null ? parseFloat(req.body.ml_used) : parseFloat(bottling.volume_ml) * parseInt(bottling.quantity)
-    const proportional_cost = parseFloat(batch.cost_per_ml || 0) * ml
+      const ml = req.body.ml_used != null ? parseFloat(req.body.ml_used) : parseFloat(bottling.volume_ml) * parseInt(bottling.quantity)
+      const proportional_cost = parseFloat(batch.cost_per_ml || 0) * ml
 
-    const [row] = await db('bottling_batches')
-      .insert({ bottling_id: bottlingId, batch_id: batchId, ml_used: ml, proportional_cost })
-      .returning('*')
+      // Envase real = já existe uma baixa de estoque ('bottling') registrada para ele.
+      const realMv = await trx('batch_movements')
+        .where({ reference_type: 'bottling', reference_id: bottlingId, movement_type: 'bottling' })
+        .first()
+      const isReal = !!realMv
+
+      let stock_moved = false
+      if (isReal && ml > 0) {
+        const chorinhoPct = parseFloat(await getParam('chorinho_tolerance_pct', 5)) / 100
+        const mlAvailable = parseFloat(batch.remaining_ml)
+        const maxAllowed = mlAvailable + mlAvailable * chorinhoPct
+        if (ml > maxAllowed) {
+          const e = new Error(
+            `❌ ML insuficiente no lote ${batch.batch_code}. ` +
+            `Disponível: ${mlAvailable.toFixed(2)}ml · Solicitado: ${ml.toFixed(2)}ml · ` +
+            `Máx com chorinho (5%): ${maxAllowed.toFixed(2)}ml.`
+          )
+          e.status = 400; throw e
+        }
+        const mlFromStock = Math.min(ml, mlAvailable)
+        const chorinhoUsed = ml > mlAvailable ? ml - mlAvailable : 0
+        const newRemaining = Math.max(0, mlAvailable - ml)
+
+        await trx('batches').where('id', batchId).update({
+          remaining_ml: newRemaining,
+          status: newRemaining <= 0 && batch.status !== 'Em maceração' ? 'Finalizado' : batch.status,
+          updated_at: trx.fn.now()
+        })
+        await trx('batch_movements').insert({
+          batch_id: batchId, movement_type: 'bottling', quantity_ml: -mlFromStock,
+          previous_ml: mlAvailable, current_ml: newRemaining,
+          reference_id: bottlingId, reference_type: 'bottling',
+          notes: `Envase ${bottling.bottling_code} — vínculo de lote (${mlFromStock.toFixed(2)}ml debitados do estoque)`,
+          operator: 'system'
+        })
+        if (chorinhoUsed > 0) {
+          await trx('batch_movements').insert({
+            batch_id: batchId, movement_type: 'chorinho', quantity_ml: -chorinhoUsed,
+            previous_ml: 0, current_ml: 0, reference_id: bottlingId, reference_type: 'bottling',
+            notes: `🍷 CHORINHO: ${chorinhoUsed.toFixed(2)}ml extras no vínculo do lote.`, operator: 'system'
+          })
+        }
+        stock_moved = true
+      }
+
+      const [row] = await trx('bottling_batches')
+        .insert({ bottling_id: bottlingId, batch_id: batchId, ml_used: ml, proportional_cost })
+        .returning('*')
+
+      return { row, batch, product, stock_moved }
+    })
 
     // Devolve já com dados para a tela renderizar sem recarregar tudo.
-    res.status(201).json({ ...row, batch_code: batch.batch_code, cost_per_ml: batch.cost_per_ml, project_name: product.project_name })
+    res.status(201).json({
+      ...out.row, batch_code: out.batch.batch_code, cost_per_ml: out.batch.cost_per_ml,
+      project_name: out.product.project_name, stock_moved: out.stock_moved
+    })
   } catch (e) {
-    res.status(400).json({ error: e.message })
+    res.status(e.status || 400).json({ error: e.message })
   }
 }
 
 // DELETE /api/bottlings/:id/candidate-batches/:batchId
-// Desfaz o vínculo (undo). NÃO restaura remaining_ml (não abatemos ao vincular).
+// Desfaz o vínculo. Se este par (envase↔lote) tirou estoque de verdade (soma das
+// movimentações 'bottling'/'bottling_reversal' negativa), DEVOLVE exatamente esse
+// saldo ao lote e registra a reversão. Vínculo histórico neutro → soma 0 → no-op.
 async function unlinkBatch (req, res) {
   try {
-    const deleted = await db('bottling_batches')
-      .where({ bottling_id: parseInt(req.params.id), batch_id: parseInt(req.params.batchId) })
-      .del()
-    if (!deleted) return res.status(404).json({ error: 'Vínculo não encontrado' })
-    res.json({ ok: true })
+    const bottlingId = parseInt(req.params.id)
+    const batchId = parseInt(req.params.batchId)
+
+    const out = await db.transaction(async (trx) => {
+      const link = await trx('bottling_batches').where({ bottling_id: bottlingId, batch_id: batchId }).first()
+      if (!link) { const e = new Error('Vínculo não encontrado'); e.status = 404; throw e }
+
+      // Impacto líquido de estoque deste par (chorinho é virtual → excluído).
+      const agg = await trx('batch_movements')
+        .where({ reference_type: 'bottling', reference_id: bottlingId, batch_id: batchId })
+        .whereIn('movement_type', ['bottling', 'bottling_reversal'])
+        .sum({ net: 'quantity_ml' })
+      const net = parseFloat((agg[0] && agg[0].net) || 0) // negativo se debitou
+      const restore = net < 0 ? -net : 0
+
+      await trx('bottling_batches').where({ bottling_id: bottlingId, batch_id: batchId }).del()
+
+      let restored = 0
+      if (restore > 0) {
+        const batch = await trx('batches').where('id', batchId).first()
+        const prev = parseFloat(batch.remaining_ml)
+        // respeita a constraint remaining_ml <= quantity_ml
+        const capped = Math.min(prev + restore, parseFloat(batch.quantity_ml))
+        const applied = capped - prev
+        if (applied !== 0) {
+          await trx('batches').where('id', batchId).update({
+            remaining_ml: capped,
+            status: batch.status === 'Finalizado' && capped > 0 ? 'Pronto para envase' : batch.status,
+            updated_at: trx.fn.now()
+          })
+          await trx('batch_movements').insert({
+            batch_id: batchId, movement_type: 'bottling_reversal', quantity_ml: applied,
+            previous_ml: prev, current_ml: capped, reference_id: bottlingId, reference_type: 'bottling',
+            notes: `Reversão do vínculo do envase #${bottlingId} — ${applied.toFixed(2)}ml devolvidos ao lote`,
+            operator: 'system'
+          })
+          restored = applied
+        }
+      }
+      return { restored }
+    })
+
+    res.json({ ok: true, restored_ml: out.restored })
   } catch (e) {
-    res.status(400).json({ error: e.message })
+    res.status(e.status || 400).json({ error: e.message })
   }
 }
 
