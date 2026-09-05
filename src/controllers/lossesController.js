@@ -294,11 +294,36 @@ exports.delete = async (req, res) => {
           .increment('quantity_available', loss.quantity_lost)
         break
 
-      case 'Batch':
-        await trx('batches')
-          .where({ id: loss.item_id })
-          .increment('remaining_ml', loss.quantity_lost)
+      case 'Batch': {
+        const batch = await trx('batches').where({ id: loss.item_id }).first()
+        if (batch) {
+          const prev = parseFloat(batch.remaining_ml)
+          // devolve o que foi perdido, sem exceder o volume produzido (constraint do banco)
+          const capped = Math.min(prev + parseFloat(loss.quantity_lost), parseFloat(batch.quantity_ml))
+          const applied = capped - prev
+          await trx('batches').where({ id: loss.item_id }).update({
+            remaining_ml: capped,
+            status: batch.status === 'Finalizado' && capped > 0 ? 'Pronto para envase' : batch.status,
+            updated_at: trx.fn.now()
+          })
+          // Movimento de reversão para a trilha bater com o saldo (não há tipo 'loss_reversal';
+          // usa 'adjustment'). Guard: quantity_ml != 0 (CHECK do banco).
+          if (applied !== 0) {
+            await trx('batch_movements').insert({
+              batch_id: loss.item_id,
+              movement_type: 'adjustment',
+              quantity_ml: applied,
+              previous_ml: prev,
+              current_ml: capped,
+              reference_id: parseInt(id),
+              reference_type: 'loss_reversal',
+              notes: `Reversão de perda: ${loss.reason || ''}`.trim(),
+              operator: loss.operator || 'system'
+            })
+          }
+        }
         break
+      }
 
       case 'Bottling':
         await trx('bottlings')

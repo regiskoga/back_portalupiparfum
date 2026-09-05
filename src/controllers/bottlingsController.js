@@ -483,6 +483,17 @@ async function remove(req, res) {
         })
       }
       
+      // Restaurar frascos e rótulos ao estoque de insumos (espelha o consumo do create)
+      const qty = parseInt(bottling.quantity) || 0
+      if (bottling.bottle_supply_id && qty > 0) {
+        await trx('supplies').where('id', bottling.bottle_supply_id).increment('quantity_available', qty)
+        await trx('supplies').where('id', bottling.bottle_supply_id).update({ is_open: true })
+      }
+      if (bottling.label_supply_id && qty > 0) {
+        await trx('supplies').where('id', bottling.label_supply_id).increment('quantity_available', qty)
+        await trx('supplies').where('id', bottling.label_supply_id).update({ is_open: true })
+      }
+
       // Remover envase (CASCADE remove bottling_batches)
       await trx('bottlings').where('id', parseInt(req.params.id)).del()
     })
