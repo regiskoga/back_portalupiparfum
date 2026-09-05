@@ -25,5 +25,6 @@ router.get('/:id',
   ctrl.getOne
 )
 router.post('/', transferRules, validate, ctrl.create)
+router.delete('/:id', [param('id').isInt()], validate, ctrl.remove)
 
 module.exports = router

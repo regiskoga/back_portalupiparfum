@@ -472,16 +472,20 @@ async function remove(req, res) {
       return res.status(409).json({ error: 'Lote não pode ser excluído pois está vinculado a ordens de envase.' })
     }
 
-    // Restaurar estoque das essências usadas neste lote
+    // Restaurar estoque das essências E dos insumos de fórmula (álcool, água, etc.)
+    // usados neste lote — espelha o consumo do create (batch_essences + batch_formula_items).
     const batchEssences = await db('batch_essences').where({ batch_id: id }).select('supply_id', 'quantity')
+    const batchFormulaItems = await db('batch_formula_items').where({ batch_id: id }).select('supply_id', 'quantity')
 
     await db.transaction(async trx => {
-      for (const be of batchEssences) {
+      const restoreSupply = async (supply_id, quantity) => {
         await trx.raw(
           'UPDATE supplies SET quantity_available = quantity_available + ?, is_open = true WHERE id = ?',
-          [parseFloat(be.quantity), parseInt(be.supply_id)]
+          [parseFloat(quantity), parseInt(supply_id)]
         )
       }
+      for (const be of batchEssences) await restoreSupply(be.supply_id, be.quantity)
+      for (const fi of batchFormulaItems) await restoreSupply(fi.supply_id, fi.quantity)
       await trx('batches').where('id', id).del()
     })
 

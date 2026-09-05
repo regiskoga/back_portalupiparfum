@@ -354,10 +354,78 @@ async function stats(req, res) {
   }
 }
 
+// ─── UNDO TRANSFER ────────────────────────────────────────────────────────────
+// Desfaz uma transferência: devolve o ml ao lote de ORIGEM e retira do DESTINO,
+// gravando movimentos de estorno. Bloqueia se o destino já não tiver o líquido
+// (foi consumido em envase/perda/outra transferência) — senão criaria saldo negativo.
+async function remove (req, res) {
+  try {
+    const id = parseInt(req.params.id)
+    const out = await db.transaction(async (trx) => {
+      const transfer = await trx('batch_transfers').where('id', id).first()
+      if (!transfer) { const e = new Error('Transferência não encontrada'); e.status = 404; throw e }
+
+      const qty = parseFloat(transfer.quantity_ml)
+      const source = await trx('batches').where('id', transfer.source_batch_id).first()
+      const dest = await trx('batches').where('id', transfer.destination_batch_id).first()
+      if (!source || !dest) { const e = new Error('Lote de origem/destino não encontrado'); e.status = 404; throw e }
+
+      // O destino precisa ter o líquido para devolver.
+      if (parseFloat(dest.remaining_ml) < qty) {
+        const e = new Error(
+          `Não é possível desfazer: o lote de destino ${dest.batch_code} tem apenas ` +
+          `${parseFloat(dest.remaining_ml)}ml dos ${qty}ml transferidos (o restante já foi usado).`
+        )
+        e.status = 409; throw e
+      }
+
+      // Destino: retira de volta (−qty)
+      const destPrev = parseFloat(dest.remaining_ml)
+      const destNew = destPrev - qty
+      await trx('batches').where('id', dest.id).update({
+        remaining_ml: destNew,
+        status: destNew <= 0 && dest.status !== 'Em maceração' ? 'Finalizado' : dest.status,
+        updated_at: trx.fn.now()
+      })
+      await trx('batch_movements').insert({
+        batch_id: dest.id, movement_type: 'adjustment', quantity_ml: -qty,
+        previous_ml: destPrev, current_ml: destNew,
+        reference_id: id, reference_type: 'batch_transfer_reversal',
+        notes: `Estorno de transferência recebida de ${source.batch_code} (${qty}ml)`, operator: 'system'
+      })
+
+      // Origem: recebe de volta (+qty), respeitando o teto quantity_ml
+      const srcPrev = parseFloat(source.remaining_ml)
+      const srcNew = Math.min(srcPrev + qty, parseFloat(source.quantity_ml))
+      const srcApplied = srcNew - srcPrev
+      await trx('batches').where('id', source.id).update({
+        remaining_ml: srcNew,
+        status: source.status === 'Finalizado' && srcNew > 0 ? 'Pronto para envase' : source.status,
+        updated_at: trx.fn.now()
+      })
+      if (srcApplied !== 0) {
+        await trx('batch_movements').insert({
+          batch_id: source.id, movement_type: 'adjustment', quantity_ml: srcApplied,
+          previous_ml: srcPrev, current_ml: srcNew,
+          reference_id: id, reference_type: 'batch_transfer_reversal',
+          notes: `Estorno de transferência enviada p/ ${dest.batch_code} (${srcApplied}ml devolvidos)`, operator: 'system'
+        })
+      }
+
+      await trx('batch_transfers').where('id', id).del()
+      return { ok: true, restored_to_source_ml: srcApplied, removed_from_dest_ml: qty }
+    })
+    res.json(out)
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message })
+  }
+}
+
 module.exports = {
   list,
   getOne,
   create,
   getByBatch,
-  stats
+  stats,
+  remove
 }
