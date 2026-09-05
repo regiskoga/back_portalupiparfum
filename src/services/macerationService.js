@@ -42,15 +42,10 @@ async function tickAutoFinishMaceration () {
       updated_at: db.fn.now()
     })
 
-  await db('batch_movements').insert(finished.map(b => ({
-    batch_id: b.id,
-    movement_type: 'maceration_complete',
-    quantity_ml: 0,
-    previous_ml: parseFloat(b.remaining_ml),
-    current_ml: parseFloat(b.remaining_ml),
-    notes: 'Maceração concluída automaticamente',
-    operator: 'system'
-  })))
+  // NÃO gravamos batch_movement 'maceration_complete': seria quantity_ml=0, que
+  // viola o CHECK (quantity_ml <> 0) e fazia este tick estourar 500 na 1ª carga
+  // após um lote madurar. A conclusão da maceração já está em batches.status +
+  // maceration_end. (A mudança de status acima é o que importa.)
 
   return finished.length
 }

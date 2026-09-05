@@ -181,11 +181,9 @@ exports.create = async (req, res) => {
         break
 
       case 'Bottling':
-        item = await trx('bottlings')
-          .leftJoin('products', 'bottlings.product_id', 'products.id')
-          .where('bottlings.id', item_id)
-          .select('bottlings.*', 'products.name as product_name')
-          .first()
+        // bottlings NÃO tem product_id — o nome já vive em bottlings.product_name
+        // (o join antigo em products.product_id dava 500)
+        item = await trx('bottlings').where('id', item_id).first()
 
         if (!item) {
           await trx.rollback()
@@ -200,7 +198,7 @@ exports.create = async (req, res) => {
           })
         }
 
-        cost = item.cost_per_unit * quantity_lost
+        cost = parseFloat(item.unit_cost || 0) * quantity_lost // coluna correta é unit_cost
         unit = 'unidade'
         itemName = `${item.product_name} ${item.volume_ml}ml`
 
@@ -337,9 +335,12 @@ exports.delete = async (req, res) => {
       .where({ id })
       .delete()
 
-    await activityLogger.log('loss_deleted', loss.item_type.toLowerCase(), loss.item_id, {
+    // não existe activity_type 'loss_deleted' no CHECK → usa 'loss_recorded' com
+    // descrição de reversão (antes o log falhava silenciosamente)
+    await activityLogger.log('loss_recorded', loss.item_type.toLowerCase(), loss.item_id, {
       entityName: loss.item_name,
-      description: `Perda revertida: ${loss.item_name} - ${loss.quantity_lost} ${loss.unit}`
+      description: `Perda revertida (deletada): ${loss.item_name} - ${loss.quantity_lost} ${loss.unit}`,
+      operator: loss.operator || 'system'
     })
 
     await trx.commit()

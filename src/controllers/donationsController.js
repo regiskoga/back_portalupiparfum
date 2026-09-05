@@ -121,15 +121,9 @@ exports.create = async (req, res) => {
       })
     }
 
-    // Buscar envase
-    const bottling = await trx('bottlings')
-      .leftJoin('products', 'bottlings.product_id', 'products.id')
-      .where('bottlings.id', bottling_id)
-      .select(
-        'bottlings.*',
-        'products.name as product_name'
-      )
-      .first()
+    // Buscar envase (bottlings NÃO tem product_id — o nome já vive em
+    // bottlings.product_name; o join antigo em products.product_id dava 500)
+    const bottling = await trx('bottlings').where('id', bottling_id).first()
 
     if (!bottling) {
       await trx.rollback()
@@ -144,8 +138,8 @@ exports.create = async (req, res) => {
       })
     }
 
-    // Calcular custos
-    const unitCost = bottling.cost_per_unit
+    // Calcular custos (a coluna correta é unit_cost — cost_per_unit não existe)
+    const unitCost = parseFloat(bottling.unit_cost || 0)
     const totalCost = unitCost * quantity
 
     // Baixar estoque de frascos
@@ -172,21 +166,16 @@ exports.create = async (req, res) => {
       })
       .returning('*')
 
-    // Log da atividade
-    await activityLogger.log(trx, {
-      type: 'donation_registered',
-      entity_type: 'bottling',
-      entity_id: bottling_id,
-      description: `Doação registrada: ${quantity} unidade(s) de ${bottling.product_name} ${bottling.volume_ml}ml`,
-      metadata: {
-        donation_id: donation.id,
-        donation_type,
-        quantity,
-        total_cost: totalCost,
-        customer_id,
-        recipient_name
-      }
-    })
+    // Log da atividade (activity_type válido via helper — antes usava assinatura
+    // errada log(trx,{...}) e o registro falhava silenciosamente)
+    await activityLogger.logDonation(
+      'bottling',
+      bottling_id,
+      `${bottling.product_name} ${bottling.volume_ml}ml`,
+      quantity,
+      recipient_name || (customer_id ? `cliente #${customer_id}` : 'Não identificado'),
+      operator || 'system'
+    )
 
     await trx.commit()
 
@@ -250,16 +239,13 @@ exports.delete = async (req, res) => {
       .where({ id })
       .delete()
 
-    // Log da atividade
-    await activityLogger.log(trx, {
-      type: 'donation_deleted',
-      entity_type: 'bottling',
-      entity_id: donation.bottling_id,
-      description: `Doação deletada (reversão): ${donation.quantity} unidade(s) de ${donation.product_name}`,
-      metadata: {
-        donation_id: id,
-        quantity: donation.quantity
-      }
+    // Log da atividade (não existe activity_type 'donation_deleted' no CHECK →
+    // usa 'donation_recorded' com descrição de reversão)
+    await activityLogger.log('donation_recorded', 'bottling', donation.bottling_id, {
+      entityName: donation.product_name,
+      description: `Doação revertida (deletada): ${donation.quantity} unidade(s) de ${donation.product_name}`,
+      changes: { reverted_donation_id: parseInt(id), quantity: donation.quantity },
+      operator: donation.operator || 'system'
     })
 
     await trx.commit()

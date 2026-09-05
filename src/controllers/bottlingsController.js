@@ -396,14 +396,25 @@ async function update(req, res) {
     
     const updateData = { ...req.body }
     updateData.updated_at = db.fn.now()
-    
-    // Remover campos que não devem ser atualizados diretamente
+
+    // Remover campos de custo (recalculados internamente)
     delete updateData.liquid_cost
     delete updateData.bottle_cost
     delete updateData.label_cost
     delete updateData.total_cost
     delete updateData.unit_cost
-    
+
+    // Remover campos que AFETAM ESTOQUE — editar aqui não reconcilia o líquido do
+    // lote nem os frascos/rótulos já consumidos (causaria drift silencioso).
+    // Para mudar volume/quantidade/insumos, exclua o envase (que reverte o estoque)
+    // e recrie. Só metadados (notes, data, nome, tipo) são editáveis por aqui.
+    delete updateData.volume_ml
+    delete updateData.quantity
+    delete updateData.quantity_available
+    delete updateData.bottle_supply_id
+    delete updateData.label_supply_id
+    delete updateData.batches
+
     const [updated] = await db('bottlings')
       .where('id', parseInt(req.params.id))
       .update(updateData)

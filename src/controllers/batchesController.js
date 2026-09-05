@@ -559,19 +559,12 @@ async function startMaceration(req, res) {
         updated_at: db.fn.now()
       })
       .returning('*')
-    
-    // Registrar movimentação
-    await db('batch_movements').insert({
-      batch_id: parseInt(req.params.id),
-      movement_type: 'maceration_start',
-      quantity_ml: 0,
-      previous_ml: parseFloat(batch.remaining_ml),
-      current_ml: parseFloat(batch.remaining_ml),
-      notes: `Início da maceração (${macerationDays} dias)`,
-      operator: 'system'
-    })
-    
-    // Log da maceração
+
+    // NÃO gravamos batch_movement de maceração: seria quantity_ml=0, que viola o
+    // CHECK (quantity_ml <> 0) e estourava o insert (a maceração não altera saldo).
+    // A linha do tempo da maceração já vive em batches.maceration_start/maceration_end.
+
+    // Log da maceração (activity_logs)
     await ActivityLogger.logMacerationStart(batch.id, batch.batch_code, macerationEnd)
     
     res.json(updated)
