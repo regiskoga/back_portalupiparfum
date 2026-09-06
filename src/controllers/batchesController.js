@@ -648,7 +648,9 @@ async function mergeBatches (req, res) {
     // Herdar product_id do primeiro lote (todos devem ser do mesmo produto)
     const mergedProductId = batches[0].product_id || null
     const reduced_lot_number = await getNextReducedLotNumber(mergedProductId)
-    const batch_code = generateBatchCode(mergedProductId || 0, parseInt(formula_id), today, reduced_lot_number)
+    // generateBatchCode(product_id, formula_id, lab_id, production_date, N) — faltava
+    // o lab_id, então production_date recebia o N (número) e .replace() dava 500.
+    const batch_code = generateBatchCode(mergedProductId || 0, parseInt(formula_id), 0, today, reduced_lot_number)
 
     const result = await db.transaction(async (trx) => {
       const [newBatch] = await trx('batches').insert({
@@ -676,9 +678,30 @@ async function mergeBatches (req, res) {
         operator: 'system'
       })
 
-      await trx('batches')
-        .whereIn('id', batch_ids)
-        .update({ status: 'Finalizado', updated_at: db.fn.now() })
+      // Lotes de origem: zeram o saldo (o líquido migrou para o lote unificado) e
+      // registram a saída — antes só viravam 'Finalizado' mantendo remaining_ml
+      // "fantasma" (SUM(remaining_ml) contava em dobro e a trilha ficava incompleta).
+      for (const sb of batches) {
+        const prev = parseFloat(sb.remaining_ml)
+        await trx('batches').where('id', sb.id).update({
+          remaining_ml: 0,
+          status: 'Finalizado',
+          updated_at: trx.fn.now()
+        })
+        if (prev > 0) {
+          await trx('batch_movements').insert({
+            batch_id: sb.id,
+            movement_type: 'transfer_out',
+            quantity_ml: -prev,
+            previous_ml: prev,
+            current_ml: 0,
+            reference_id: newBatch.id,
+            reference_type: 'batch_merge',
+            notes: `Unificado no lote ${newBatch.batch_code}`,
+            operator: 'system'
+          })
+        }
+      }
 
       return newBatch
     })
