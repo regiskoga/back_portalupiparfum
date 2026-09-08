@@ -139,8 +139,13 @@ exports.create = async (req, res) => {
         break
 
       case 'Batch':
-        item = await trx('batches')
-          .where({ id: item_id })
+        // join com projeto/fórmula: o item_name é gravado como snapshot e o
+        // código do lote sozinho não identifica nada na listagem de perdas
+        item = await trx('batches as b')
+          .leftJoin('products as p', 'p.id', 'b.product_id')
+          .leftJoin('formulas as f', 'f.id', 'b.formula_id')
+          .where('b.id', item_id)
+          .select('b.*', 'p.project_name', 'f.name as formula_name')
           .first()
 
         if (!item) {
@@ -157,7 +162,9 @@ exports.create = async (req, res) => {
 
         cost = item.cost_per_ml * quantity_lost
         unit = 'ml'
-        itemName = `Lote ${item.batch_code}`
+        itemName = `${item.project_name || item.formula_name || 'Lote'}`
+                 + `${item.reduced_lot_number ? ` [Lote ${item.reduced_lot_number}]` : ''}`
+                 + ` · ${item.batch_code}`
 
         const newRemainingMl = Math.max(0, parseFloat(item.remaining_ml) - quantity_lost)
         await trx('batches')
