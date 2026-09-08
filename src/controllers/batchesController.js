@@ -33,13 +33,30 @@ function buildMacerationInfo (batch, macerationDays, today) {
 
 // ─── GENERATE BATCH CODE ──────────────────────────────────────────────────────
 // Formato: L_PPPPP_FFFFF_LLLL_YYYYMMDD_N  (N vem de getNextReducedLotNumber — nunca recalculado aqui)
-// LLLL = laboratório = id do fornecedor da 1ª essência do lote (4 dígitos). 0000 = sem essência.
-function generateBatchCode (product_id, formula_id, lab_id, production_date, N) {
+// LLLL = laboratório = número do laboratório da 1ª essência do lote. 0000 = sem essência.
+function generateBatchCode (product_id, formula_id, lab_number, production_date, N) {
   const paddedProject = String(product_id || 0).padStart(5, '0')
   const paddedFormula = String(formula_id || 0).padStart(5, '0')
-  const paddedLab     = String(lab_id || 0).padStart(4, '0')
+  const paddedLab     = String(lab_number || 0).padStart(4, '0')
   const datePart = (production_date || new Date().toISOString().slice(0, 10)).replace(/-/g, '')
   return `L_${paddedProject}_${paddedFormula}_${paddedLab}_${datePart}_${N}`
+}
+
+// ─── NÚMERO DO LABORATÓRIO ────────────────────────────────────────────────────
+// É o número do NOME do fornecedor ("Laboratório 4" → 4), não o id da linha em
+// suppliers: os fornecedores que não são laboratório deslocam a numeração
+// (Laboratório 4 = id 12). Sem número no nome, cai no id para não perder a
+// referência.
+function labNumberFromName (name, fallbackId = 0) {
+  const m = String(name || '').match(/(\d+)(?!.*\d)/)
+  return m ? parseInt(m[1], 10) : (parseInt(fallbackId) || 0)
+}
+
+async function getLabNumber (supplier_id) {
+  const id = parseInt(supplier_id) || 0
+  if (!id) return 0
+  const sup = await db('suppliers').where({ id }).select('name').first()
+  return labNumberFromName(sup?.name, id)
 }
 
 // ─── REDUCED LOT NUMBER ───────────────────────────────────────────────────────
@@ -250,16 +267,19 @@ async function create(req, res) {
 
     // Validar e calcular custo das essências (batch lookup)
     let essenceCost = 0
-    let labId = 0   // laboratório = fornecedor da 1ª essência (para o código do lote)
+    let labNumber = 0   // laboratório = fornecedor da 1ª essência (para o código do lote)
     if (essences.length > 0) {
       const essenceIds = [...new Set(essences.map(e => parseInt(e.supply_id)))]
-      const suppliesMap = await db('supplies')
-        .whereIn('id', essenceIds)
-        .select('id', 'name', 'unit', 'unit_cost', 'quantity_available', 'is_open', 'supplier_id')
+      const suppliesMap = await db('supplies as s')
+        .leftJoin('suppliers as sup', 'sup.id', 's.supplier_id')
+        .whereIn('s.id', essenceIds)
+        .select('s.id', 's.name', 's.unit', 's.unit_cost', 's.quantity_available',
+                's.is_open', 's.supplier_id', 'sup.name as supplier_name')
         .then(rows => Object.fromEntries(rows.map(r => [r.id, r])))
 
       // Lab = fornecedor da PRIMEIRA essência informada (a principal).
-      labId = suppliesMap[parseInt(essences[0].supply_id)]?.supplier_id || 0
+      const labSupply = suppliesMap[parseInt(essences[0].supply_id)]
+      labNumber = labNumberFromName(labSupply?.supplier_name, labSupply?.supplier_id)
 
       // Agrupa total por supply_id — mesma essência duas vezes soma antes de validar
       const neededBySupply = {}
@@ -297,7 +317,7 @@ async function create(req, res) {
     const batch_code = providedCode?.trim() || generateBatchCode(
       product_id ? parseInt(product_id) : 0,
       parseInt(formula_id),
-      labId,
+      labNumber,
       production_date,
       reduced_lot_number
     )
@@ -716,14 +736,15 @@ async function nextCode (req, res) {
   try {
     const { product_id, formula_id, production_date, supplier_id } = req.query
     const reduced_lot_number = await getNextReducedLotNumber(product_id ? parseInt(product_id) : null)
+    const lab_number = await getLabNumber(supplier_id)
     const code = generateBatchCode(
       product_id ? parseInt(product_id) : 0,
       formula_id ? parseInt(formula_id) : 0,
-      supplier_id ? parseInt(supplier_id) : 0,
+      lab_number,
       production_date || null,
       reduced_lot_number
     )
-    res.json({ batch_code: code, reduced_lot_number })
+    res.json({ batch_code: code, reduced_lot_number, lab_number })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
