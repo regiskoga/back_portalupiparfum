@@ -614,10 +614,199 @@ async function getSalesDashboard(req, res) {
   }
 }
 
+// ─── NOTIFICAÇÕES (sino do topo) ──────────────────────────────────────────────
+// Diferente de /alerts, que devolve uma linha por item: aqui os avisos vêm
+// AGRUPADOS por tipo, com contagem + amostra. Sem agrupar o sino seria
+// inutilizável — só "essência abaixo do mínimo" dá 246 linhas hoje.
+async function getNotifications (req, res) {
+  try {
+    const { essenceLabel } = require('../services/essenceName')
+    const paramsRows = await db('parameters').select('key', 'value')
+    const p = Object.fromEntries(paramsRows.map(r => [r.key, parseFloat(r.value)]))
+
+    const bottleWarn = p.low_stock_bottle_warning  ?? 50
+    const bottleCrit = p.low_stock_bottle_critical ?? 20
+    const essWarn    = p.low_stock_supply_warning  ?? 100
+    const essCrit    = p.low_stock_supply_critical ?? 50
+    const macDays    = p.maceration_alert_days     ?? 3
+    const staleDays  = p.order_stale_days          ?? 7
+    const idleDays   = p.essence_idle_days         ?? 180
+
+    const SAMPLE = 8
+    const groups = []
+
+    // ① Frascos com estoque baixo (não existia alerta nenhum para frasco)
+    const bottles = await db('supplies')
+      .where('type', 'Bottle')
+      .where('quantity_available', '<', bottleWarn)
+      .orderBy('quantity_available', 'asc')
+      .select('id', 'name', 'quantity_available', 'unit')
+
+    if (bottles.length > 0) {
+      const crit = bottles.filter(b => parseFloat(b.quantity_available) < bottleCrit)
+      groups.push({
+        key: 'bottle_low_stock',
+        severity: crit.length > 0 ? 'critical' : 'warning',
+        title: 'Frascos com estoque baixo',
+        count: bottles.length,
+        summary: crit.length > 0
+          ? `${crit.length} abaixo de ${bottleCrit} un.` +
+            (bottles.length > crit.length ? ` · ${bottles.length - crit.length} abaixo de ${bottleWarn}` : '')
+          : `${bottles.length} abaixo de ${bottleWarn} un.`,
+        route: 'insumos',
+        items: bottles.slice(0, SAMPLE).map(b => ({
+          label: b.name,
+          detail: `${parseFloat(b.quantity_available)} ${b.unit}`,
+          severity: parseFloat(b.quantity_available) < bottleCrit ? 'critical' : 'warning',
+        })),
+      })
+    }
+
+    // ② Essências com estoque baixo (regra que já existia, agora agrupada).
+    // Só as ABERTAS: essência já consumida e fechada não é "estoque baixo",
+    // é estoque gasto — senão a lista começa com um monte de 0 ml.
+    const essences = await db('supplies')
+      .where('type', 'Essence')
+      .where('is_open', true)
+      .where('quantity_available', '<', essWarn)
+      .orderBy('quantity_available', 'asc')
+      .select('id', 'name', 'quantity_available', 'unit')
+
+    if (essences.length > 0) {
+      const crit = essences.filter(e => parseFloat(e.quantity_available) < essCrit)
+      groups.push({
+        key: 'essence_low_stock',
+        severity: crit.length > 0 ? 'critical' : 'warning',
+        title: 'Essências com estoque baixo',
+        count: essences.length,
+        summary: `${crit.length} abaixo de ${essCrit}ml · ${essences.length} abaixo de ${essWarn}ml`,
+        route: 'essencias-estoque',
+        items: essences.slice(0, SAMPLE).map(e => ({
+          label: essenceLabel(e.name),
+          detail: `${parseFloat(e.quantity_available)} ${e.unit}`,
+          severity: parseFloat(e.quantity_available) < essCrit ? 'critical' : 'warning',
+        })),
+      })
+    }
+
+    // ③ Pedido parado na fila: confirmado há mais de N dias e ainda sem envase
+    const staleOrders = await db('orders')
+      .whereIn('status', ['Confirmed', 'In Production'])
+      .whereRaw(`created_at < now() - (? || ' days')::interval`, [staleDays])
+      .orderBy('created_at', 'asc')
+      .select('id', 'code', 'created_at', 'status')
+
+    if (staleOrders.length > 0) {
+      const pendingRows = await db('order_items as oi')
+        .leftJoin(
+          db.raw('(SELECT order_item_id, SUM(quantity) AS linked FROM order_item_bottlings GROUP BY order_item_id) l'),
+          'l.order_item_id', 'oi.id'
+        )
+        .whereIn('oi.order_id', staleOrders.map(o => o.id))
+        .whereNotNull('oi.product_id')
+        .groupBy('oi.order_id')
+        .select('oi.order_id')
+        .select(db.raw('SUM(GREATEST(0, oi.quantity - COALESCE(l.linked, 0))) AS pending'))
+
+      const pendingByOrder = Object.fromEntries(pendingRows.map(r => [r.order_id, parseInt(r.pending)]))
+      const travados = staleOrders.filter(o => (pendingByOrder[o.id] || 0) > 0)
+
+      if (travados.length > 0) {
+        groups.push({
+          key: 'order_stale',
+          severity: 'warning',
+          title: 'Pedidos parados na fila',
+          count: travados.length,
+          summary: `sem envase completo há mais de ${staleDays} dias`,
+          route: 'producao',
+          items: travados.slice(0, SAMPLE).map(o => {
+            const dias = Math.floor((Date.now() - new Date(o.created_at)) / 86400000)
+            return {
+              label: o.code,
+              detail: `há ${dias} dias · faltam ${pendingByOrder[o.id]} un.`,
+              severity: 'warning',
+            }
+          }),
+        })
+      }
+    }
+
+    // ④ Maceração terminando nos próximos dias
+    const macerando = await db('batches as b')
+      .leftJoin('products as p', 'p.id', 'b.product_id')
+      .where('b.status', 'Em maceração')
+      .whereNotNull('b.maceration_end')
+      .where('b.maceration_end', '>', db.fn.now())
+      .whereRaw(`b.maceration_end <= now() + (? || ' days')::interval`, [macDays])
+      .orderBy('b.maceration_end', 'asc')
+      .select('b.id', 'b.batch_code', 'b.reduced_lot_number', 'b.maceration_end', 'p.project_name')
+
+    if (macerando.length > 0) {
+      groups.push({
+        key: 'maceration_ending',
+        severity: 'info',
+        title: 'Maceração terminando',
+        count: macerando.length,
+        summary: `nos próximos ${macDays} dias`,
+        route: 'acompanhamento-maceracao',
+        items: macerando.slice(0, SAMPLE).map(b => {
+          const dias = Math.ceil((new Date(b.maceration_end) - Date.now()) / 86400000)
+          return {
+            label: `${b.project_name || b.batch_code}${b.reduced_lot_number ? ` [Lote ${b.reduced_lot_number}]` : ''}`,
+            detail: dias <= 0 ? 'hoje' : `em ${dias} dia${dias > 1 ? 's' : ''}`,
+            severity: 'info',
+          }
+        }),
+      })
+    }
+
+    // ⑤ Essência comprada há muito tempo e nunca usada (dinheiro parado)
+    const idle = await db('supplies')
+      .where('type', 'Essence')
+      .whereRaw('quantity_available >= quantity_purchased')
+      .whereNotNull('purchase_date')
+      .whereRaw(`purchase_date < now() - (? || ' days')::interval`, [idleDays])
+      .orderBy('purchase_date', 'asc')
+      .select('id', 'name', 'purchase_date', 'quantity_available', 'unit')
+
+    if (idle.length > 0) {
+      groups.push({
+        key: 'essence_idle',
+        severity: 'info',
+        title: 'Essências paradas',
+        count: idle.length,
+        summary: `compradas há mais de ${idleDays} dias e nunca usadas`,
+        route: 'essencias-estoque',
+        items: idle.slice(0, SAMPLE).map(e => {
+          const dias = Math.floor((Date.now() - new Date(e.purchase_date)) / 86400000)
+          return {
+            label: essenceLabel(e.name),
+            detail: `${parseFloat(e.quantity_available)} ${e.unit} · há ${dias} dias`,
+            severity: 'info',
+          }
+        }),
+      })
+    }
+
+    res.json({
+      generated_at: new Date().toISOString(),
+      // Contagem do sino = nº de GRUPOS, não de itens: o selo precisa ser legível.
+      badge:    groups.length,
+      critical: groups.filter(g => g.severity === 'critical').length,
+      warning:  groups.filter(g => g.severity === 'warning').length,
+      groups,
+    })
+  } catch (error) {
+    console.error('Error building notifications:', error)
+    res.status(500).json({ error: error.message })
+  }
+}
+
 module.exports = {
   getOverview,
   getFinancialDashboard,
   getProductionDashboard,
   getAlerts,
+  getNotifications,
   getSalesDashboard
 }
