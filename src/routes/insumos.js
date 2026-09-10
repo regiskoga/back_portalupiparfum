@@ -17,6 +17,8 @@ const supplyRules = [
 
 router.get   ('/',                    ctrl.list)
 router.get   ('/stats',               ctrl.stats)
+// antes de /:id para não ser capturada pelo pattern de parâmetro
+router.get   ('/essences-summary',    ctrl.essencesSummary)
 router.get   ('/:id/consumption', [param('id').isInt()], validate, ctrl.getConsumption)
 router.get   ('/:id', [param('id').isInt()], validate, ctrl.getOne)
 router.post  ('/test', (req, res) => {

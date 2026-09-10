@@ -302,4 +302,91 @@ async function getConsumption (req, res) {
   }
 }
 
-module.exports = { list, getOne, create, update, remove, stats, toggleOpen, getConsumption }
+// ─── RESUMO DE ESSÊNCIAS ──────────────────────────────────────────────────────
+// Tela-resumo "tenho ou não tenho": uma linha por marca + essência +
+// laboratório, com comprado / utilizado / disponível em ml.
+//
+// Cada registro de `supplies` é uma COMPRA (mesma essência comprada 2x = 2
+// linhas), por isso o agrupamento. Marca e essência vivem dentro do nome, no
+// padrão "Marca Insp.: X - Inspiração: Y" — existem as duas grafias no banco
+// ("Inspiração" e "Inpiração"), o parse cobre as duas.
+//
+// utilizado = comprado − disponível: inclui o que foi para lote, perdas e
+// ajustes manuais, então a conta sempre fecha com o saldo.
+const { parseEssenceName } = require('../services/essenceName')
+
+async function essencesSummary (req, res) {
+  try {
+    const rows = await db('supplies as s')
+      .leftJoin('suppliers as sp', 'sp.id', 's.supplier_id')
+      .where('s.type', 'Essence')
+      .select(
+        's.id', 's.name', 's.unit', 's.supplier_id',
+        's.quantity_purchased', 's.quantity_available',
+        's.unit_cost', 's.purchase_date', 's.is_open',
+        'sp.name as lab'
+      )
+
+    const map = new Map()
+    for (const r of rows) {
+      const { brand, essence } = parseEssenceName(r.name)
+      const key = `${brand.toLowerCase()}||${essence.toLowerCase()}||${r.supplier_id || 0}`
+
+      let g = map.get(key)
+      if (!g) {
+        g = {
+          brand:         brand || '—',
+          essence,
+          supplier_id:   r.supplier_id || null,
+          lab:           r.lab || '—',
+          unit:          r.unit || 'ml',
+          purchased_ml:  0,
+          available_ml:  0,
+          used_ml:       0,
+          total_paid:    0,
+          purchases:     0,
+          last_purchase: null,
+          supply_ids:    [],
+        }
+        map.set(key, g)
+      }
+
+      const purchased = parseFloat(r.quantity_purchased || 0)
+      const available = parseFloat(r.quantity_available || 0)
+      g.purchased_ml += purchased
+      g.available_ml += available
+      g.total_paid   += parseFloat(r.unit_cost || 0) * purchased
+      g.purchases    += 1
+      g.supply_ids.push(r.id)
+      if (r.purchase_date && (!g.last_purchase || new Date(r.purchase_date) > new Date(g.last_purchase))) {
+        g.last_purchase = r.purchase_date
+      }
+    }
+
+    const data = [...map.values()].map(g => ({
+      ...g,
+      used_ml:       Math.max(0, g.purchased_ml - g.available_ml),
+      avg_unit_cost: g.purchased_ml > 0 ? g.total_paid / g.purchased_ml : null,
+    })).sort((a, b) =>
+      a.brand.localeCompare(b.brand, 'pt-BR', { sensitivity: 'base' }) ||
+      a.essence.localeCompare(b.essence, 'pt-BR', { sensitivity: 'base' })
+    )
+
+    res.json({
+      data,
+      totals: {
+        linhas:       data.length,
+        compras:      rows.length,
+        purchased_ml: data.reduce((s, g) => s + g.purchased_ml, 0),
+        available_ml: data.reduce((s, g) => s + g.available_ml, 0),
+        used_ml:      data.reduce((s, g) => s + g.used_ml, 0),
+        sem_saldo:    data.filter(g => g.available_ml <= 0).length,
+      },
+    })
+  } catch (e) {
+    console.error('Error building essences summary:', e)
+    res.status(500).json({ error: e.message })
+  }
+}
+
+module.exports = { list, getOne, create, update, remove, stats, toggleOpen, getConsumption, essencesSummary }
