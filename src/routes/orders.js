@@ -124,6 +124,7 @@ router.post(
     body('volume_ml').isFloat({ gt: 0 }).withMessage('volume_ml must be greater than 0'),
     body('quantity').isInt({ min: 1 }).withMessage('quantity must be at least 1'),
     body('unit_price').isFloat({ min: 0 }).withMessage('unit_price must be >= 0'),
+    body('packaging_type_id').optional({ nullable: true }).isInt({ min: 1 }),
   ],
   validate,
   ordersController.addItem
@@ -142,6 +143,7 @@ router.patch(
     body('volume_ml').isFloat({ gt: 0 }).withMessage('volume_ml must be greater than 0'),
     body('quantity').isInt({ min: 1 }).withMessage('quantity must be at least 1'),
     body('unit_price').isFloat({ min: 0 }).withMessage('unit_price must be >= 0'),
+    body('packaging_type_id').optional({ nullable: true }).isInt({ min: 1 }),
   ],
   validate,
   ordersController.updateItem

@@ -463,7 +463,7 @@ exports.create = async (req, res) => {
     const processedItems = []
 
     for (const item of items) {
-      const { product_id, volume_ml, quantity, unit_price, item_discount = 0 } = item
+      const { product_id, volume_ml, quantity, unit_price, item_discount = 0, packaging_type_id = null } = item
 
       // Executar motor de decisão
       const decision = await orderDecisionEngine.executeDecision({
@@ -482,6 +482,7 @@ exports.create = async (req, res) => {
           volume_ml,
           quantity,
           unit_price,
+          packaging_type_id: packaging_type_id ? parseInt(packaging_type_id) : null,
           item_discount: parseFloat(item_discount) || 0,
           decision_status: decision.status,
           estimated_days: decision.estimatedDays,
@@ -883,7 +884,7 @@ exports.applyKit = async (req, res) => {
 exports.updateItem = async (req, res) => {
   try {
     const { orderId, itemId } = req.params
-    const { product_id, volume_ml, quantity, unit_price, item_discount } = req.body
+    const { product_id, volume_ml, quantity, unit_price, item_discount, packaging_type_id } = req.body
 
     const order = await db('orders').where({ id: orderId }).first()
     if (!order) return res.status(404).json({ error: 'Order not found' })
@@ -906,6 +907,10 @@ exports.updateItem = async (req, res) => {
       decision_notes: decision.notes,
     }
     if (item_discount !== undefined) updateData.item_discount = parseFloat(item_discount) || 0
+    // Embalagem: só sobrescreve quando o cliente manda o campo (undefined = não mexe)
+    if (packaging_type_id !== undefined) {
+      updateData.packaging_type_id = packaging_type_id ? parseInt(packaging_type_id) : null
+    }
 
     const [updated] = await db('order_items')
       .where({ id: itemId })
@@ -1274,6 +1279,7 @@ exports.addItem = async (req, res) => {
         volume_ml,
         quantity,
         unit_price,
+        packaging_type_id: req.body.packaging_type_id ? parseInt(req.body.packaging_type_id) : null,
         item_discount: parseFloat(item_discount) || 0,
         decision_status: decision.status,
         estimated_days: decision.estimatedDays,
