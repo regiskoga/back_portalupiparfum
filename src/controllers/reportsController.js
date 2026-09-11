@@ -174,8 +174,10 @@ exports.topProducts = async (req, res) => {
       row.revenue += parseFloat(v.receita || 0)
     }
 
+    // Ranking por RECEITA (decisão do cliente): o que mais vendeu em dinheiro,
+    // não em quantidade. Empate desce para frascos e depois ml.
     const data = [...linhas.values()]
-      .sort((a, b) => b.units - a.units || b.ml_sold - a.ml_sold)
+      .sort((a, b) => b.revenue - a.revenue || b.units - a.units || b.ml_sold - a.ml_sold)
       .map((r, i) => ({
         ...r,
         rank:       i + 1,
