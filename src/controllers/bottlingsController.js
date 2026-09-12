@@ -25,6 +25,37 @@ async function recalcBottlingCost (trx, bottlingId) {
   })
 }
 
+// Anexa os dados do PROJETO a uma lista de envases, resolvendo pelo SKU
+// (products.sku = bottlings.product_ref). O envase só guarda `product_name`, que
+// nos criados pelo sistema é apenas o nome do projeto — sem isto a tela não tem
+// como mostrar nem buscar pela inspiração ("Blue Talisman"). Mapa em JS em vez de
+// join para não multiplicar linhas se algum sku repetir.
+// ⚠️ NÃO usar isto para reescrever bottlings.product_name: orderDecisionEngine
+// .checkReadyStock casa product_name = products.project_name.
+async function attachProducts (bottlings) {
+  const refs = [...new Set(bottlings.map(b => b.product_ref).filter(Boolean))]
+  if (refs.length === 0) return bottlings
+
+  const produtos = await db('products')
+    .whereIn('sku', refs)
+    .select('id', 'sku', 'project_name', 'commercial_name', 'inspiration_brand', 'inspiration_name')
+  const porSku = Object.fromEntries(produtos.map(p => [p.sku, p]))
+
+  for (const b of bottlings) {
+    const p = porSku[b.product_ref]
+    // `project_id`, NÃO `product_id`: o filtro ?product_id= desta mesma rota quer
+    // dizer outra coisa ("envasado a partir de lote deste produto", via
+    // bottling_batches). Como 2.619 envases não têm vínculo de lote, os dois
+    // conceitos divergem — mesmo nome no mesmo payload seria armadilha.
+    b.project_id        = p ? p.id : null
+    b.project_name      = p ? p.project_name : null
+    b.commercial_name   = p ? p.commercial_name : null
+    b.inspiration_brand = p ? p.inspiration_brand : null
+    b.inspiration_name  = p ? p.inspiration_name : null
+  }
+  return bottlings
+}
+
 // ─── GENERATE BOTTLING CODE ───────────────────────────────────────────────────
 async function generateBottlingCode () {
   const today = new Date()
@@ -61,6 +92,20 @@ async function list(req, res) {
         this.where('bt.bottling_code', 'ilike', `%${search}%`)
           .orWhere('bt.product_name', 'ilike', `%${search}%`)
           .orWhere('bt.product_ref', 'ilike', `%${search}%`)
+          // Buscar pela INSPIRAÇÃO: os envases criados pelo sistema gravam só o
+          // nome do projeto em product_name (os importados guardam o nome
+          // completo), então sem isto não se acha "Blue Talisman" num envase novo.
+          // Subquery em vez de join para não arriscar fan-out se um sku repetir.
+          .orWhereIn('bt.product_ref', function () {
+            this.select('sku').from('products')
+              .whereNotNull('sku').where('sku', '<>', '')
+              .where(function () {
+                this.where('project_name', 'ilike', `%${search}%`)
+                  .orWhere('commercial_name', 'ilike', `%${search}%`)
+                  .orWhere('inspiration_brand', 'ilike', `%${search}%`)
+                  .orWhere('inspiration_name', 'ilike', `%${search}%`)
+              })
+          })
       })
     }
 
@@ -106,6 +151,8 @@ async function list(req, res) {
         bottling.batches = batches
         bottling.total_ml_used = batches.reduce((sum, b) => sum + parseFloat(b.ml_used), 0)
       }
+
+      await attachProducts(bottlings)
     }
 
     res.json(bottlings)
@@ -151,7 +198,9 @@ async function getOne(req, res) {
     
     bottling.batches = batches
     bottling.total_ml_used = batches.reduce((sum, b) => sum + parseFloat(b.ml_used), 0)
-    
+
+    await attachProducts([bottling])
+
     res.json(bottling)
   } catch (error) {
     res.status(500).json({ error: error.message })

@@ -59,61 +59,146 @@ async function buildEssenceIndex () {
   }
   const saldo = Object.fromEntries(essencias.map(e => [e.id, parseFloat(e.quantity_available || 0)]))
 
+  // Quanto de essência o projeto gasta POR LOTE, na média do que ele já produziu.
+  // É o divisor de "com esse saldo dá pra fazer mais N lotes" — a pergunta que o
+  // relatório precisa responder (produzir ou comprar). Só existe para projeto que
+  // já teve lote com essência; sem histórico não há régua e o N fica null.
+  const consumo = await db('batch_essences as be')
+    .join('batches as b', 'b.id', 'be.batch_id')
+    .whereNotNull('b.product_id')
+    .groupBy('b.product_id')
+    .select('b.product_id')
+    .sum('be.quantity as ml_total')
+    .countDistinct('b.id as lotes')
+
+  // Fallback: a maioria dos lotes foi carregada na importação SEM essência
+  // registrada (só 9 dos 143 projetos vendidos têm histórico em batch_essences),
+  // então o consumo real cobre quase ninguém. Quando não há histórico, estima
+  // pela fórmula: volume médio do lote × % de essência.
+  const previsto = await db('batches as b')
+    .join('formulas as f', 'f.id', 'b.formula_id')
+    .whereNotNull('b.product_id')
+    .where('f.essence_percentage', '>', 0)
+    .where('b.quantity_ml', '>', 0)
+    .groupBy('b.product_id')
+    .select('b.product_id')
+    .select(db.raw('AVG(b.quantity_ml * f.essence_percentage / 100.0) AS ml_lote'))
+
+  const mlPorLote = new Map()
+  for (const r of previsto) {
+    const ml = parseFloat(r.ml_lote || 0)
+    if (ml > 0) mlPorLote.set(r.product_id, { ml, base: 'formula' })
+  }
+  // Consumo real ganha do previsto onde existir.
+  for (const r of consumo) {
+    const lotes = parseInt(r.lotes || 0)
+    const total = parseFloat(r.ml_total || 0)
+    if (lotes > 0 && total > 0) mlPorLote.set(r.product_id, { ml: total / lotes, base: 'consumo' })
+  }
+
   return function essenceFor (product) {
+    const regua = mlPorLote.get(product.id) || null
+    const base = {
+      essence_ml_batch:  regua ? regua.ml : null,
+      essence_batch_base: regua ? regua.base : null,
+    }
+    const lotesPossiveis = ml => (regua && ml != null ? Math.floor(ml / regua.ml) : null)
+
     const ids = porProduto.get(product.id)
     if (ids && ids.length > 0) {
+      const ml = ids.reduce((s, id) => s + (saldo[id] || 0), 0)
       return {
-        essence_ml:     ids.reduce((s, id) => s + (saldo[id] || 0), 0),
-        essence_source: 'lote',
-        essence_count:  ids.length,
+        ...base,
+        essence_ml:       ml,
+        essence_source:   'lote',
+        essence_count:    ids.length,
+        batches_possible: lotesPossiveis(ml),
       }
     }
     const chave = `${norm(product.inspiration_brand)}|${norm(product.inspiration_name)}`
     const lista = porMarcaNome.get(chave) || porNome.get(norm(product.inspiration_name))
     if (lista && lista.length > 0) {
+      const ml = lista.reduce((s, e) => s + parseFloat(e.quantity_available || 0), 0)
       return {
-        essence_ml:     lista.reduce((s, e) => s + parseFloat(e.quantity_available || 0), 0),
-        essence_source: 'inspiracao',
-        essence_count:  lista.length,
+        ...base,
+        essence_ml:       ml,
+        essence_source:   'inspiracao',
+        essence_count:    lista.length,
+        batches_possible: lotesPossiveis(ml),
       }
     }
-    return { essence_ml: null, essence_source: null, essence_count: 0 }
+    return { ...base, essence_ml: null, essence_source: null, essence_count: 0, batches_possible: null }
   }
 }
 
-// ─── ESTOQUE POR PRODUTO ──────────────────────────────────────────────────────
-// Duas naturezas diferentes, não somáveis: líquido em lote (ml) e frasco já
-// envasado e disponível (unidades).
-async function buildStockIndex () {
+// ─── PRODUTO ACABADO POR SKU ──────────────────────────────────────────────────
+// bottlings liga a products por SKU (product_ref). Agrupado ANTES de qualquer
+// join para não multiplicar o estoque pelo nº de itens de pedido do produto.
+// Separa venda de brinde e ignora envase inativo — mesma regra que o resto do
+// sistema já usa (getReadyBottlingsByProduct, stockSummary) e que ESTE relatório
+// não aplicava: brinde entrava no "Prontos" e inflava a coluna.
+async function readyUnitsBySku () {
+  const rows = await db('bottlings')
+    .whereNotNull('product_ref').where('product_ref', '<>', '')
+    .where('active', true)
+    .where('quantity_available', '>', 0)
+    .whereIn('type', ['normal', 'brinde'])
+    .groupBy('product_ref', 'type')
+    .select('product_ref', 'type')
+    .sum('quantity_available as un')
+
+  const ready = {}, gifts = {}
+  for (const r of rows) {
+    const alvo = r.type === 'brinde' ? gifts : ready
+    alvo[r.product_ref] = (alvo[r.product_ref] || 0) + (parseInt(r.un) || 0)
+  }
+  return { ready, gifts }
+}
+
+// Lotes vivos (com saldo) agrupados por produto — a mesma lista que alimenta a
+// linha expandida das duas abas.
+async function buildBatchIndex () {
   const lotes = await db('batches')
     .whereNotNull('product_id')
     .whereNot('status', 'Finalizado')
     .where('remaining_ml', '>', 0)
-    .groupBy('product_id')
-    .select('product_id')
-    .sum('remaining_ml as ml')
-    .count('* as lotes')
+    .orderBy('reduced_lot_number', 'asc')
+    .select('id', 'product_id', 'batch_code', 'reduced_lot_number', 'remaining_ml',
+            'quantity_ml', 'status', 'production_date', 'maceration_end', 'cost_per_ml')
 
-  // bottlings liga a products por SKU (product_ref). Agrupado ANTES do join para
-  // não multiplicar o estoque pelo nº de itens de pedido do produto.
-  const envases = await db('bottlings')
-    .whereNotNull('product_ref')
-    .where('quantity_available', '>', 0)
-    .groupBy('product_ref')
-    .select('product_ref')
-    .sum('quantity_available as un')
+  const porProduto = new Map()
+  for (const l of lotes) {
+    let e = porProduto.get(l.product_id)
+    if (!e) { e = { ml: 0, lotes: 0, macerating_ml: 0, lots: [] }; porProduto.set(l.product_id, e) }
+    const ml = parseFloat(l.remaining_ml || 0)
+    e.ml += ml
+    e.lotes += 1
+    if (l.status === 'Em maceração') e.macerating_ml += ml
+    e.lots.push({
+      id: l.id, batch_code: l.batch_code, reduced_lot_number: l.reduced_lot_number,
+      remaining_ml: ml, quantity_ml: parseFloat(l.quantity_ml || 0),
+      status: l.status, production_date: l.production_date,
+      maceration_end: l.maceration_end, cost_per_ml: l.cost_per_ml,
+    })
+  }
+  return porProduto
+}
 
-  const mlPorProduto = Object.fromEntries(lotes.map(r => [r.product_id, {
-    ml: parseFloat(r.ml || 0), lotes: parseInt(r.lotes || 0),
-  }]))
-  const unPorSku = Object.fromEntries(envases.map(r => [r.product_ref, parseInt(r.un || 0)]))
+// ─── ESTOQUE POR PRODUTO ──────────────────────────────────────────────────────
+// Três naturezas diferentes, não somáveis: líquido em lote (ml), frasco de venda
+// já envasado (unidades) e frasco de brinde (unidades).
+async function buildStockIndex () {
+  const [porProduto, { ready, gifts }] = await Promise.all([buildBatchIndex(), readyUnitsBySku()])
 
   return function stockFor (product) {
-    const l = mlPorProduto[product.id] || { ml: 0, lotes: 0 }
+    const l = porProduto.get(product.id) || { ml: 0, lotes: 0, macerating_ml: 0, lots: [] }
     return {
       stock_ml:      l.ml,
       stock_batches: l.lotes,
-      ready_units:   product.sku ? (unPorSku[product.sku] || 0) : 0,
+      macerating_ml: l.macerating_ml,
+      lots:          l.lots,
+      ready_units:   product.sku ? (ready[product.sku] || 0) : 0,
+      gift_units:    product.sku ? (gifts[product.sku] || 0) : 0,
     }
   }
 }
@@ -151,6 +236,7 @@ exports.topProducts = async (req, res) => {
       if (!row) {
         row = {
           product_id:        p.id,
+          sku:               p.sku,
           project_name:      p.project_name,
           commercial_name:   p.commercial_name,
           inspiration_brand: p.inspiration_brand,
@@ -180,10 +266,12 @@ exports.topProducts = async (req, res) => {
       .sort((a, b) => b.revenue - a.revenue || b.units - a.units || b.ml_sold - a.ml_sold)
       .map((r, i) => ({
         ...r,
-        rank:       i + 1,
-        revenue:    money(r.revenue),
-        stock_ml:   money(r.stock_ml),
-        essence_ml: r.essence_ml == null ? null : money(r.essence_ml),
+        rank:             i + 1,
+        revenue:          money(r.revenue),
+        stock_ml:         money(r.stock_ml),
+        macerating_ml:    money(r.macerating_ml),
+        essence_ml:       r.essence_ml == null ? null : money(r.essence_ml),
+        essence_ml_batch: r.essence_ml_batch == null ? null : money(r.essence_ml_batch),
       }))
 
     res.json({
@@ -311,13 +399,7 @@ exports.stockOverview = async (req, res) => {
       )
       .orderBy('b.reduced_lot_number', 'asc')
 
-    const envases = await db('bottlings')
-      .whereNotNull('product_ref')
-      .where('quantity_available', '>', 0)
-      .groupBy('product_ref')
-      .select('product_ref')
-      .sum('quantity_available as un')
-    const unPorSku = Object.fromEntries(envases.map(r => [r.product_ref, parseInt(r.un || 0)]))
+    const { ready, gifts } = await readyUnitsBySku()
 
     const porProduto = new Map()
     for (const l of lotes) {
@@ -325,6 +407,7 @@ exports.stockOverview = async (req, res) => {
       if (!row) {
         row = {
           product_id:        l.product_id,
+          sku:               l.sku,
           project_name:      l.project_name,
           commercial_name:   l.commercial_name,
           inspiration_brand: l.inspiration_brand || '—',
@@ -332,7 +415,8 @@ exports.stockOverview = async (req, res) => {
           stock_ml:          0,
           batches:           0,
           macerating_ml:     0,
-          ready_units:       l.sku ? (unPorSku[l.sku] || 0) : 0,
+          ready_units:       l.sku ? (ready[l.sku] || 0) : 0,
+          gift_units:        l.sku ? (gifts[l.sku] || 0) : 0,
           lots:              [],
         }
         porProduto.set(l.product_id, row)
@@ -367,6 +451,7 @@ exports.stockOverview = async (req, res) => {
         macerating_ml: money(data.reduce((s, r) => s + r.macerating_ml, 0)),
         batches:       data.reduce((s, r) => s + r.batches, 0),
         ready_units:   data.reduce((s, r) => s + r.ready_units, 0),
+        gift_units:    data.reduce((s, r) => s + r.gift_units, 0),
       },
     })
   } catch (e) {
