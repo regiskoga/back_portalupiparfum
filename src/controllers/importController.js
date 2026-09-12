@@ -111,7 +111,34 @@ const TEMPLATE = {
     example: [
       [`${EXAMPLE_MARK} Frasco 50ml`, 3, 10]
     ]
+  },
+
+  'Pedidos Antigos': {
+    title: 'Tela: Comercial → Pedidos Antigos (histórico anterior ao sistema — UMA LINHA POR PERFUME do pedido; repita o Código do Pedido para agrupar)',
+    headers: ['Código do Pedido', 'Cliente', 'Data', 'Canal', 'Projeto', 'Volume (ml)', 'Quantidade', 'Preço Unitário (R$)', 'Desconto do Pedido (R$)', 'Frete (R$)', 'Observações'],
+    example: [
+      [`${EXAMPLE_MARK} P-001`, 'Maria Silva', '2026-03-12', 'WhatsApp', 'Dragon Tea', 30, 2, 89.90, 10.00, 15.00, 'Desconto e frete valem para o pedido todo — preencha só na 1ª linha'],
+      [`${EXAMPLE_MARK} P-001`, 'Maria Silva', '2026-03-12', 'WhatsApp', 'Blush Petals', 50, 1, 129.90, '', '', 'Mesma referência P-001 = mesmo pedido'],
+      [`${EXAMPLE_MARK} P-002`, 'Airton Lopes', '2026-03-15', 'Instagram', 'Dragon Tea', 15, 3, 59.90, '', '', '']
+    ]
   }
+}
+
+// Canais aceitos pelo CHECK de orders.channel (migration 20260523_002).
+const CANAIS = ['WhatsApp', 'Instagram', 'Loja física', 'Site', 'Indicação', 'Outro']
+
+function normalizeChannel (v) {
+  const s = toString(v)
+  if (!s) return ''
+  const n = normalizeKey(s)
+  const hit = CANAIS.find(c => normalizeKey(c) === n)
+  if (hit) return hit
+  if (n.includes('whats') || n === 'zap') return 'WhatsApp'
+  if (n.includes('insta')) return 'Instagram'
+  if (n.includes('loja') || n.includes('fisic')) return 'Loja física'
+  if (n.includes('site') || n.includes('web')) return 'Site'
+  if (n.includes('indica')) return 'Indicação'
+  return 'Outro'
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1019,6 +1046,145 @@ async function processDescontos (trx, rows, dryRun) {
 // ══════════════════════════════════════════════════════════════════════════════
 // PARSE + ORQUESTRADOR
 // ══════════════════════════════════════════════════════════════════════════════
+// ── PEDIDOS ANTIGOS (histórico anterior ao sistema) ─────────────────────────────
+// Uma linha por PERFUME; linhas com o mesmo "Código do Pedido" viram um pedido só.
+// Entram em orders/order_items com is_legacy=true e status 'Delivered'.
+//
+// NÃO mexem em estoque: nascem com stock_decremented=true justamente para que
+// nenhum fluxo posterior (cancelar, voltar etapa) tente "devolver" frascos que
+// nunca saíram do sistema. Também não criam envase, lote nem vínculo.
+//
+// created_at recebe a DATA DA PLANILHA — é a coluna pela qual os relatórios
+// filtram período; usar o now() padrão jogaria todo o histórico para hoje.
+async function processPedidosAntigos (trx, rows, dryRun) {
+  const errors = []; let ok = 0
+
+  // Agrupa por código do pedido preservando a ordem de aparição.
+  const grupos = new Map()
+  for (const r of rows) {
+    const code = toString(getCol(r, 'Código do Pedido', 'Codigo do Pedido', 'Pedido', 'Código', 'Codigo'))
+    if (!code) {
+      errors.push({ row: r._row, msg: 'Código do Pedido é obrigatório (é ele que agrupa os itens)' })
+      continue
+    }
+    const key = normCode(code)
+    if (!grupos.has(key)) grupos.set(key, { code, linhas: [] })
+    grupos.get(key).linhas.push(r)
+  }
+
+  const customerCache = new Map()
+  async function ensureCustomer (nome) {
+    const key = nome.toLowerCase()
+    if (customerCache.has(key)) return customerCache.get(key)
+    let c = await trx('customers').whereRaw('LOWER(name) = ?', key).first()
+    if (!c && !dryRun) {
+      const [inserted] = await trx('customers')
+        .insert({ name: nome, notes: 'Criado pela importação de pedidos antigos' })
+        .returning('*')
+      c = inserted
+    }
+    customerCache.set(key, c || null)
+    return c || null
+  }
+
+  for (const { code, linhas } of grupos.values()) {
+    const primeira = linhas[0]
+
+    const cliente = toString(getCol(primeira, 'Cliente', 'Nome do Cliente'))
+    if (!cliente) {
+      errors.push({ row: primeira._row, msg: `Pedido ${code}: Cliente é obrigatório` })
+      continue
+    }
+
+    const data = parseExcelDate(getCol(primeira, 'Data', 'Data do Pedido'))
+    if (!data) {
+      errors.push({ row: primeira._row, msg: `Pedido ${code}: Data inválida ou em branco (use AAAA-MM-DD ou DD/MM/AAAA)` })
+      continue
+    }
+
+    // Monta os itens antes de tocar no banco — pedido sem item válido não entra.
+    const itens = []
+    for (const r of linhas) {
+      const projeto = toString(getCol(r, 'Projeto', 'Perfume', 'Produto'))
+      if (!projeto) {
+        errors.push({ row: r._row, msg: `Pedido ${code}: Projeto é obrigatório na linha do item` })
+        continue
+      }
+      const produto = await findProduct(trx, { projectName: projeto, commercialName: projeto })
+      if (!produto) {
+        errors.push({ row: r._row, msg: `Pedido ${code}: projeto "${projeto}" não encontrado — cadastre na aba Projetos primeiro` })
+        continue
+      }
+      const volume = toNumber(getCol(r, 'Volume (ml)', 'Volume', 'Vol'))
+      const qtd    = toNumber(getCol(r, 'Quantidade', 'Qtd'))
+      const preco  = toNumber(getCol(r, 'Preço Unitário (R$)', 'Preco Unitario (R$)', 'Preço Unitário', 'Preco Unitario', 'Valor Unitário'))
+      if (!(qtd > 0)) {
+        errors.push({ row: r._row, msg: `Pedido ${code}: Quantidade inválida (precisa ser maior que zero)` })
+        continue
+      }
+      itens.push({
+        product_id:   produto.id,
+        product_name: produto.project_name || projeto,
+        product_ref:  produto.sku || '',
+        volume_ml:    volume != null && volume > 0 ? volume : 0,
+        quantity:     qtd,
+        unit_price:   preco != null && preco >= 0 ? preco : 0,
+        item_discount: 0,
+      })
+    }
+
+    if (itens.length === 0) {
+      errors.push({ row: primeira._row, msg: `Pedido ${code}: nenhum item válido — pedido ignorado` })
+      continue
+    }
+
+    if (dryRun) { ok += itens.length; continue }
+
+    const customer = await ensureCustomer(cliente)
+    if (!customer) {
+      errors.push({ row: primeira._row, msg: `Pedido ${code}: não foi possível resolver o cliente "${cliente}"` })
+      continue
+    }
+
+    const pedido = {
+      customer_id:       customer.id,
+      code,
+      status:            'Delivered',
+      channel:           normalizeChannel(getCol(primeira, 'Canal')),
+      discount:          toNumber(getCol(primeira, 'Desconto do Pedido (R$)', 'Desconto')) || 0,
+      shipping:          toNumber(getCol(primeira, 'Frete (R$)', 'Frete')) || 0,
+      notes:             toString(getCol(primeira, 'Observações', 'Observacoes')),
+      is_legacy:         true,
+      stock_decremented: true,
+      created_at:        data,
+      updated_at:        data,
+    }
+
+    // Reimportar a mesma planilha corrige em vez de duplicar. Um pedido REAL com
+    // o mesmo código não é tocado — o histórico nunca sobrescreve operação viva.
+    const existente = await trx('orders').where({ code }).first()
+    if (existente && !existente.is_legacy) {
+      errors.push({ row: primeira._row, msg: `Pedido ${code}: já existe um pedido do sistema com esse código — renomeie o código na planilha` })
+      continue
+    }
+
+    let orderId
+    if (existente) {
+      await trx('orders').where({ id: existente.id }).update(pedido)
+      await trx('order_items').where({ order_id: existente.id }).del()
+      orderId = existente.id
+    } else {
+      const [novo] = await trx('orders').insert(pedido).returning('*')
+      orderId = novo.id
+    }
+
+    await trx('order_items').insert(itens.map(i => ({ ...i, order_id: orderId })))
+    ok += itens.length
+  }
+
+  return { ok, errors }
+}
+
 function parseWorkbook (buffer) {
   const wb = xlsx.read(buffer, { type: 'buffer', cellDates: false })
   const out = {}
@@ -1043,7 +1209,9 @@ const SHEET_PROCESSORS = {
   // Embalagens ANTES de Preços/Descontos (FK packaging_type_id)
   'Embalagens':          { fn: processEmbalagens },
   'Preços':              { fn: processPrecos },
-  'Descontos por Volume':{ fn: processDescontos }
+  'Descontos por Volume':{ fn: processDescontos },
+  // Por último: depende de Clientes e Projetos já processados nesta transação.
+  'Pedidos Antigos':     { fn: processPedidosAntigos }
 }
 
 // Processa todas as abas ou apenas uma (se sheetName for fornecido)

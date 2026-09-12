@@ -22,6 +22,15 @@ function periodFilter (query, col, { start, end }) {
   return query
 }
 
+// Pedidos antigos (importados por planilha) contam por padrão — é o motivo de
+// carregar o histórico. `include_legacy=false` isola o que foi vendido desde que
+// o sistema entrou no ar.
+function legacyFilter (query, col, includeLegacy) {
+  return includeLegacy ? query : query.where(col, false)
+}
+
+const wantsLegacy = q => String(q.include_legacy ?? 'true') !== 'false'
+
 // ─── ESSÊNCIA DO PROJETO ──────────────────────────────────────────────────────
 // Não existe vínculo formal entre essência e projeto. Duas fontes, nesta ordem:
 //   'lote'       → essências realmente consumidas em lotes daquele projeto (certo)
@@ -217,6 +226,7 @@ exports.topProducts = async (req, res) => {
       .sum('oi.quantity as un')
       .select(db.raw('SUM(oi.quantity * oi.unit_price) AS receita'))
     q = periodFilter(q, 'o.created_at', { start, end })
+    q = legacyFilter(q, 'o.is_legacy', wantsLegacy(req.query))
     const vendas = await q
 
     if (vendas.length === 0) return res.json({ data: [], volumes: VOLUME_COLUMNS, totals: null })
@@ -304,7 +314,9 @@ exports.topCustomers = async (req, res) => {
         'o.amount_paid', 'o.payment_date', 'o.payment_method',
         'c.name as customer_name', 'c.phone as customer_phone'
       )
+      .select('o.is_legacy')
     q = periodFilter(q, 'o.created_at', { start, end })
+    q = legacyFilter(q, 'o.is_legacy', wantsLegacy(req.query))
     const pedidos = await q
 
     if (pedidos.length === 0) return res.json({ data: [], totals: null })
@@ -351,6 +363,7 @@ exports.topCustomers = async (req, res) => {
       c.order_list.push({
         id: p.id, code: p.code, status: p.status, created_at: p.created_at,
         total, paid: pago, payment_method: p.payment_method, payment_date: p.payment_date,
+        is_legacy: !!p.is_legacy,
       })
     }
 

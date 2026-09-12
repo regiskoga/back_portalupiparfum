@@ -279,7 +279,7 @@ exports.list = async (req, res) => {
     const limit = parseInt(req.query.limit) || 50
     const offset = (page - 1) * limit
 
-    const { status, customer_id } = req.query
+    const { status, customer_id, is_legacy } = req.query
 
     let query = db('orders')
       .leftJoin('customers', 'orders.customer_id', 'customers.id')
@@ -297,6 +297,13 @@ exports.list = async (req, res) => {
       query = query.where('orders.customer_id', customer_id)
     }
 
+    // Pedidos antigos vivem na mesma tabela, separados só por flag. Sem o filtro
+    // explícito a tela de Pedidos/Vendas mostraria o histórico importado no meio
+    // da operação do dia a dia.
+    if (is_legacy !== undefined) {
+      query = query.where('orders.is_legacy', String(is_legacy) === 'true')
+    }
+
     const orders = await query
       .orderBy('orders.created_at', 'desc')
       .limit(limit)
@@ -305,6 +312,7 @@ exports.list = async (req, res) => {
     let countQuery = db('orders')
     if (status) countQuery = countQuery.where('orders.status', status)
     if (customer_id) countQuery = countQuery.where('orders.customer_id', customer_id)
+    if (is_legacy !== undefined) countQuery = countQuery.where('orders.is_legacy', String(is_legacy) === 'true')
     const [{ total }] = await countQuery.count('* as total')
 
     res.json({
