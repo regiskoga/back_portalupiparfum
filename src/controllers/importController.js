@@ -1122,13 +1122,22 @@ async function processPedidosAntigos (trx, rows, dryRun) {
         errors.push({ row: r._row, msg: `Pedido ${code}: Quantidade inválida (precisa ser maior que zero)` })
         continue
       }
+      // Preço em branco (célula vazia, fórmula quebrada, '#REF!') entrava calado
+      // como 0 e o pedido inteiro ficava sem valor nenhum — foi assim que 702 dos
+      // 1.014 pedidos da primeira carga vieram zerados, sem uma linha de erro.
+      // Zero EXPLÍCITO continua válido (brinde/cortesia no histórico); o que vira
+      // erro é o campo em branco, que `toNumber` devolve como null.
+      if (preco == null) {
+        errors.push({ row: r._row, msg: `Pedido ${code}: Preço Unitário em branco ou inválido no item "${projeto}" — se foi de graça, preencha 0` })
+        continue
+      }
       itens.push({
         product_id:   produto.id,
         product_name: produto.project_name || projeto,
         product_ref:  produto.sku || '',
         volume_ml:    volume != null && volume > 0 ? volume : 0,
         quantity:     qtd,
-        unit_price:   preco != null && preco >= 0 ? preco : 0,
+        unit_price:   preco >= 0 ? preco : 0,
         item_discount: 0,
       })
     }
