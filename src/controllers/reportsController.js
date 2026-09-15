@@ -164,23 +164,37 @@ async function readyUnitsBySku () {
   return { ready, gifts }
 }
 
-// Lotes vivos (com saldo) agrupados por produto — a mesma lista que alimenta a
-// linha expandida das duas abas.
-async function buildBatchIndex () {
-  const lotes = await db('batches')
+// Lotes agrupados por produto — a mesma lista que alimenta a linha expandida das
+// duas abas.
+//
+// `includeEmpty` traz também os lotes esgotados (Finalizado / remaining_ml = 0).
+// O ranking de vendidos continua só com lote vivo (é "o que dá para vender");
+// já o Estoque rápido precisa dos esgotados para mostrar o projeto zerado em vez
+// de sumir com ele da lista.
+async function buildBatchIndex ({ includeEmpty = false } = {}) {
+  let q = db('batches')
     .whereNotNull('product_id')
-    .whereNot('status', 'Finalizado')
-    .where('remaining_ml', '>', 0)
     .orderBy('reduced_lot_number', 'asc')
     .select('id', 'product_id', 'batch_code', 'reduced_lot_number', 'remaining_ml',
             'quantity_ml', 'status', 'production_date', 'maceration_end', 'cost_per_ml')
 
+  if (!includeEmpty) {
+    q = q.whereNot('status', 'Finalizado').where('remaining_ml', '>', 0)
+  }
+
+  const lotes = await q
+
   const porProduto = new Map()
   for (const l of lotes) {
     let e = porProduto.get(l.product_id)
-    if (!e) { e = { ml: 0, lotes: 0, macerating_ml: 0, lots: [] }; porProduto.set(l.product_id, e) }
+    if (!e) { e = { ml: 0, lotes: 0, lotes_com_saldo: 0, macerating_ml: 0, lots: [] }; porProduto.set(l.product_id, e) }
     const ml = parseFloat(l.remaining_ml || 0)
-    e.ml += ml
+    // Saldo só conta de lote vivo: existem 21 lotes Finalizados com sobra de ml
+    // que o resto do sistema já trata como encerrados. Eles entram na lista de
+    // lotes (para o projeto aparecer e o histórico ficar visível), mas NÃO no
+    // total de estoque — senão este relatório passa a divergir de todos os outros.
+    const vivo = ml > 0 && l.status !== 'Finalizado'
+    if (vivo) { e.ml += ml; e.lotes_com_saldo += 1 }
     e.lotes += 1
     if (l.status === 'Em maceração') e.macerating_ml += ml
     e.lots.push({
@@ -398,68 +412,69 @@ exports.topCustomers = async (req, res) => {
 }
 
 // ─── 3. LISTA RÁPIDA DE ESTOQUE ───────────────────────────────────────────────
+// A lista é dirigida por PRODUTO, não por lote.
+//
+// Dirigir por lote (`join batches` + `remaining_ml > 0` + status <> Finalizado)
+// fazia o projeto inteiro DESAPARECER assim que o último lote esgotava: o cliente
+// procurava "Scandal Absolu Masculino" — que existe, tem lote Finalizado com 0 ml
+// e aparece como esgotado na Consulta de Lotes — e não achava linha nenhuma aqui.
+// "Não tenho" precisa ser visível como ZERO; sumir da lista é indistinguível de
+// "não existe", e some também da ordenação por estoque (menor → maior).
+//
+// Entra quem já produziu alguma vez (tem lote, mesmo esgotado) ou tem frasco em
+// estoque. Projeto que nunca virou lote nem envase é cadastro, não estoque.
 exports.stockOverview = async (req, res) => {
   try {
-    const lotes = await db('batches as b')
-      .join('products as p', 'p.id', 'b.product_id')
-      .whereNot('b.status', 'Finalizado')
-      .where('b.remaining_ml', '>', 0)
-      .select(
-        'b.id', 'b.batch_code', 'b.reduced_lot_number', 'b.remaining_ml', 'b.quantity_ml',
-        'b.status', 'b.production_date', 'b.maceration_end', 'b.cost_per_ml',
-        'p.id as product_id', 'p.project_name', 'p.commercial_name',
-        'p.inspiration_brand', 'p.inspiration_name', 'p.sku'
-      )
-      .orderBy('b.reduced_lot_number', 'asc')
+    const [porProduto, { ready, gifts }] = await Promise.all([
+      buildBatchIndex({ includeEmpty: true }),
+      readyUnitsBySku(),
+    ])
 
-    const { ready, gifts } = await readyUnitsBySku()
+    const produtos = await db('products')
+      .select('id', 'sku', 'project_name', 'commercial_name',
+              'inspiration_brand', 'inspiration_name')
 
-    const porProduto = new Map()
-    for (const l of lotes) {
-      let row = porProduto.get(l.product_id)
-      if (!row) {
-        row = {
-          product_id:        l.product_id,
-          sku:               l.sku,
-          project_name:      l.project_name,
-          commercial_name:   l.commercial_name,
-          inspiration_brand: l.inspiration_brand || '—',
-          inspiration_name:  l.inspiration_name || '—',
-          stock_ml:          0,
-          batches:           0,
-          macerating_ml:     0,
-          ready_units:       l.sku ? (ready[l.sku] || 0) : 0,
-          gift_units:        l.sku ? (gifts[l.sku] || 0) : 0,
-          lots:              [],
-        }
-        porProduto.set(l.product_id, row)
-      }
-      const ml = parseFloat(l.remaining_ml || 0)
-      row.stock_ml += ml
-      row.batches  += 1
-      if (l.status === 'Em maceração') row.macerating_ml += ml
-      row.lots.push({
-        id: l.id, batch_code: l.batch_code, reduced_lot_number: l.reduced_lot_number,
-        remaining_ml: ml, quantity_ml: parseFloat(l.quantity_ml || 0),
-        status: l.status, production_date: l.production_date,
-        maceration_end: l.maceration_end, cost_per_ml: l.cost_per_ml,
+    const data = []
+    for (const p of produtos) {
+      const l           = porProduto.get(p.id)
+      const ready_units = p.sku ? (ready[p.sku] || 0) : 0
+      const gift_units  = p.sku ? (gifts[p.sku] || 0) : 0
+      if (!l && !ready_units && !gift_units) continue
+
+      const stock_ml = money(l ? l.ml : 0)
+      data.push({
+        product_id:        p.id,
+        sku:               p.sku,
+        project_name:      p.project_name,
+        commercial_name:   p.commercial_name,
+        inspiration_brand: p.inspiration_brand || '—',
+        inspiration_name:  p.inspiration_name || '—',
+        stock_ml,
+        // `batches` conta TODOS os lotes, para bater com o que a linha expandida
+        // lista; `batches_with_stock` é quanto disso ainda tem saldo.
+        batches:            l ? l.lotes : 0,
+        batches_with_stock: l ? l.lotes_com_saldo : 0,
+        macerating_ml:      money(l ? l.macerating_ml : 0),
+        ready_units,
+        gift_units,
+        sem_estoque:        stock_ml === 0 && ready_units === 0 && gift_units === 0,
+        lots:               l ? l.lots : [],
       })
     }
 
-    for (const row of porProduto.values()) {
-      row.stock_ml      = money(row.stock_ml)
-      row.macerating_ml = money(row.macerating_ml)
-    }
-
-    const data = [...porProduto.values()].sort((a, b) =>
+    data.sort((a, b) =>
       (a.inspiration_brand || '').localeCompare(b.inspiration_brand || '', 'pt-BR', { sensitivity: 'base' }) ||
       (a.project_name || '').localeCompare(b.project_name || '', 'pt-BR', { sensitivity: 'base' })
     )
 
+    const comEstoque = data.filter(r => !r.sem_estoque)
+
     res.json({
       data,
       totals: {
-        produtos:      data.length,
+        listados:      data.length,
+        produtos:      comEstoque.length,
+        esgotados:     data.length - comEstoque.length,
         stock_ml:      money(data.reduce((s, r) => s + r.stock_ml, 0)),
         macerating_ml: money(data.reduce((s, r) => s + r.macerating_ml, 0)),
         batches:       data.reduce((s, r) => s + r.batches, 0),
