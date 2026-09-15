@@ -125,6 +125,10 @@ router.post(
     body('quantity').isInt({ min: 1 }).withMessage('quantity must be at least 1'),
     body('unit_price').isFloat({ min: 0 }).withMessage('unit_price must be >= 0'),
     body('packaging_type_id').optional({ nullable: true }).isInt({ min: 1 }),
+    // Chain própria desta rota (chain de express-validator é objeto mutável —
+    // compartilhar array entre rotas contamina a outra).
+    body('item_discount').optional({ nullable: true }).isFloat({ min: 0 })
+      .withMessage('Desconto por item não pode ser negativo'),
   ],
   validate,
   ordersController.addItem
@@ -144,6 +148,8 @@ router.patch(
     body('quantity').isInt({ min: 1 }).withMessage('quantity must be at least 1'),
     body('unit_price').isFloat({ min: 0 }).withMessage('unit_price must be >= 0'),
     body('packaging_type_id').optional({ nullable: true }).isInt({ min: 1 }),
+    body('item_discount').optional({ nullable: true }).isFloat({ min: 0 })
+      .withMessage('Desconto por item não pode ser negativo'),
   ],
   validate,
   ordersController.updateItem

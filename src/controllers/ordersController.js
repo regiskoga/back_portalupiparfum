@@ -175,6 +175,37 @@ async function recalcOrderCommission (orderId, conn = db) {
 }
 
 /**
+ * Mantém o "Desc./item" dentro do desconto do pedido quando um item muda.
+ *
+ * Desde 14/09/2026 o Desc./item ABATE do total: a tela de Vendas soma
+ * Σ(item_discount × qtd) no `orders.discount` ao criar o pedido, porque o total
+ * autoritativo é Σ(preço × qtd) − discount − cupom + frete e não conhece
+ * item_discount (que segue gravado no item como anotação da linha).
+ *
+ * Por isso toda mudança de item DEPOIS da criação precisa mexer no discount pelo
+ * mesmo delta. Sem isso o abatimento fica órfão: remover um item com desconto
+ * deixaria o pedido descontando algo que não está mais lá, e editar o desconto
+ * não teria efeito nenhum no total.
+ *
+ * Sempre antes de `recalcOrderCommission` — a base da comissão é
+ * "perfumes − desconto − cupom" e lê o discount já gravado.
+ */
+async function ajustaDescontoDoItem (orderId, delta, conn = db) {
+  const ajuste = Math.round(((Number(delta) || 0) + Number.EPSILON) * 100) / 100
+  if (ajuste === 0) return
+  const order = await conn('orders').where({ id: orderId }).first()
+  if (!order) return
+  // GREATEST(0, …) em JS: desconto de pedido nunca fica negativo.
+  const novo = Math.max(0, Math.round((parseFloat(order.discount || 0) + ajuste) * 100) / 100)
+  await conn('orders').where({ id: orderId })
+    .update({ discount: novo, updated_at: conn.fn.now() })
+}
+
+/** Quanto aquele item representa hoje dentro do desconto do pedido. */
+const descontoDoItem = item =>
+  (parseFloat(item?.item_discount) || 0) * (parseInt(item?.quantity) || 0)
+
+/**
  * ③ Fila de produção: pedidos CONFIRMADOS (aguardando) e EM PRODUÇÃO (em
  * andamento), do mais antigo ao mais recente, já com seus itens (perfumes) e o
  * saldo de envases prontos por produto — para acompanhar produção sem abrir
@@ -925,6 +956,10 @@ exports.updateItem = async (req, res) => {
       .update(updateData)
       .returning('*')
 
+    // O Desc./item abate do total pelo `orders.discount`, então editar o item
+    // (desconto OU quantidade) precisa mover o discount pelo mesmo delta.
+    await ajustaDescontoDoItem(orderId, descontoDoItem(updated) - descontoDoItem(item))
+
     // GAP G2: editar item muda o subtotal → recalcula cupom + comissão do parceiro.
     await recalcOrderCommission(orderId)
 
@@ -1297,6 +1332,10 @@ exports.addItem = async (req, res) => {
 
     await orderDecisionEngine.createAutomaticOrders(order.id, orderItem.id, decision.actions, trx)
 
+    // Item novo com Desc./item entra também no desconto do pedido (ver
+    // ajustaDescontoDoItem) — senão o desconto digitado aqui não abateria nada.
+    await ajustaDescontoDoItem(order.id, descontoDoItem(orderItem), trx)
+
     await recalcOrderCommission(order.id, trx)
 
     await activityLogger.log('order_updated', 'order', order.id, {
@@ -1344,6 +1383,10 @@ exports.removeItem = async (req, res) => {
     // automáticas caem por onDelete CASCADE ao deletar o item.
     await trx('order_item_bottlings').where({ order_item_id: itemId }).del()
     await trx('order_items').where({ id: itemId }).del()
+
+    // Devolve ao total o Desc./item que saiu junto com o item: sem isto o pedido
+    // continuaria descontando um item que não existe mais.
+    await ajustaDescontoDoItem(order.id, -descontoDoItem(item), trx)
 
     await recalcOrderCommission(order.id, trx)
 
