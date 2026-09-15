@@ -20,4 +20,31 @@ function essenceLabel (name) {
   return brand ? `${brand} · ${essence}` : essence
 }
 
-module.exports = { parseEssenceName, essenceLabel, ESSENCE_NAME_RX }
+// ─── Identidade da essência ───────────────────────────────────────────────────
+// Cada linha de `supplies` é uma COMPRA; a mesma essência aparece em várias
+// (518 compras para 415 essências distintas em produção). A identidade é
+// marca + essência, sem acento, caixa nem pontuação — é a chave de
+// `product_essences` (vínculo essência ↔ projeto) e viaja pronta para a tela,
+// para o front não ter de repetir esta regra de normalização.
+//
+// O laboratório fica DE FORA de propósito: a mesma essência comprada de dois
+// laboratórios é a mesma essência para o projeto.
+const normEssence = s => (s == null ? '' : String(s))
+  .normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+
+/** Chave de identidade: `essenceKey('Mancera', 'Cedrat Boise')` → 'mancera||cedrat boise' */
+function essenceKey (brand, essence) {
+  return `${normEssence(brand)}||${normEssence(essence)}`
+}
+
+/** Mesma chave a partir do nome cru do insumo. */
+function essenceKeyFromName (name) {
+  const { brand, essence } = parseEssenceName(name)
+  return essenceKey(brand, essence)
+}
+
+module.exports = {
+  parseEssenceName, essenceLabel, ESSENCE_NAME_RX,
+  essenceKey, essenceKeyFromName, normEssence,
+}

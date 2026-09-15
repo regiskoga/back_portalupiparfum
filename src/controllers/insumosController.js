@@ -313,7 +313,7 @@ async function getConsumption (req, res) {
 //
 // utilizado = comprado − disponível: inclui o que foi para lote, perdas e
 // ajustes manuais, então a conta sempre fecha com o saldo.
-const { parseEssenceName } = require('../services/essenceName')
+const { parseEssenceName, essenceKey } = require('../services/essenceName')
 
 async function essencesSummary (req, res) {
   try {
@@ -337,6 +337,10 @@ async function essencesSummary (req, res) {
         g = {
           brand:         brand || '—',
           essence,
+          // Identidade da essência (marca+essência, sem lab) — é por ela que a
+          // tela casa a linha com os vínculos de projeto. Vai pronta do backend
+          // para o front não repetir a regra de normalização.
+          essence_key:   essenceKey(brand, essence),
           supplier_id:   r.supplier_id || null,
           lab:           r.lab || '—',
           unit:          r.unit || 'ml',
@@ -389,4 +393,76 @@ async function essencesSummary (req, res) {
   }
 }
 
-module.exports = { list, getOne, create, update, remove, stats, toggleOpen, getConsumption, essencesSummary }
+// ─── VÍNCULO ESSÊNCIA ↔ PROJETO ───────────────────────────────────────────────
+// Pedido do cliente: poder dizer "esta essência é do projeto X" na tela de
+// Estoque de Essências. Antes disso o sistema só sabia adivinhar (essência
+// consumida em lote do projeto, ou nome da essência batendo com a inspiração).
+//
+// O vínculo é da IDENTIDADE da essência (marca + essência), não da compra —
+// ver `migrations/20260914_001_create_product_essences.js`.
+
+// Lista TODOS os vínculos de uma vez. São ~415 identidades de essência no total,
+// então a tela carrega tudo e casa no cliente, como as outras listas do sistema.
+async function essenceLinks (req, res) {
+  try {
+    const rows = await db('product_essences as pe')
+      .join('products as p', 'p.id', 'pe.product_id')
+      .select('pe.id', 'pe.product_id', 'pe.essence_key', 'pe.brand', 'pe.essence',
+              'p.project_name', 'p.commercial_name', 'p.sku')
+      .orderBy('p.project_name', 'asc')
+
+    res.json({ data: rows })
+  } catch (e) {
+    console.error('Error listing essence links:', e)
+    res.status(500).json({ error: e.message })
+  }
+}
+
+async function createEssenceLink (req, res) {
+  try {
+    const { product_id, brand, essence } = req.body
+    const nome = String(essence || '').trim()
+    if (!nome) return res.status(422).json({ error: 'Essência é obrigatória' })
+
+    const produto = await db('products').where({ id: product_id }).first()
+    if (!produto) return res.status(404).json({ error: 'Projeto não encontrado' })
+
+    const key = essenceKey(brand, nome)
+
+    const existente = await db('product_essences')
+      .where({ product_id, essence_key: key }).first()
+    if (existente) {
+      return res.status(409).json({ error: 'Esta essência já está vinculada a este projeto' })
+    }
+
+    const [novo] = await db('product_essences')
+      .insert({ product_id, essence_key: key, brand: String(brand || '').trim(), essence: nome })
+      .returning('*')
+
+    res.status(201).json({
+      ...novo,
+      project_name:    produto.project_name,
+      commercial_name: produto.commercial_name,
+      sku:             produto.sku,
+    })
+  } catch (e) {
+    console.error('Error creating essence link:', e)
+    res.status(500).json({ error: e.message })
+  }
+}
+
+async function removeEssenceLink (req, res) {
+  try {
+    const apagados = await db('product_essences').where({ id: req.params.id }).del()
+    if (!apagados) return res.status(404).json({ error: 'Vínculo não encontrado' })
+    res.json({ message: 'Vínculo removido' })
+  } catch (e) {
+    console.error('Error removing essence link:', e)
+    res.status(500).json({ error: e.message })
+  }
+}
+
+module.exports = {
+  list, getOne, create, update, remove, stats, toggleOpen, getConsumption, essencesSummary,
+  essenceLinks, createEssenceLink, removeEssenceLink,
+}

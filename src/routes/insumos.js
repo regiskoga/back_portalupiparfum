@@ -19,6 +19,16 @@ router.get   ('/',                    ctrl.list)
 router.get   ('/stats',               ctrl.stats)
 // antes de /:id para não ser capturada pelo pattern de parâmetro
 router.get   ('/essences-summary',    ctrl.essencesSummary)
+
+// Vínculo essência ↔ projeto. Rotas próprias (e array de regras próprio: chain de
+// express-validator é objeto mutável, compartilhar quebra a outra rota).
+router.get   ('/essence-links',       ctrl.essenceLinks)
+router.post  ('/essence-links', [
+  body('product_id').isInt({ min: 1 }).withMessage('Projeto inválido'),
+  body('essence').trim().notEmpty().withMessage('Essência é obrigatória'),
+], validate, ctrl.createEssenceLink)
+router.delete('/essence-links/:id', [param('id').isInt()], validate, ctrl.removeEssenceLink)
+
 router.get   ('/:id/consumption', [param('id').isInt()], validate, ctrl.getConsumption)
 router.get   ('/:id', [param('id').isInt()], validate, ctrl.getOne)
 router.post  ('/test', (req, res) => {
