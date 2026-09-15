@@ -80,7 +80,11 @@ async function list(req, res) {
       )
       .leftJoin('supplies as bs', 'bs.id', 'bt.bottle_supply_id')
       .leftJoin('supplies as ls', 'ls.id', 'bt.label_supply_id')
+      // Desempate por id: só `bottling_date` deixa a ordem dos envases do MESMO
+      // dia indefinida, o que saía como etiqueta "embaralhada" no Excel.
+      // Id crescente = ordem em que o envase foi criado.
       .orderBy('bt.bottling_date', 'desc')
+      .orderBy('bt.id', 'asc')
 
     if (type === 'brinde' || type === 'normal') {
       query = query.where('bt.type', type)

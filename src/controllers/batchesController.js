@@ -89,7 +89,11 @@ async function list(req, res) {
         'p.inspiration_brand',
         'p.inspiration_name'
       )
+      // Desempate por id: só `production_date` deixa a ordem dos lotes do MESMO
+      // dia indefinida (o Postgres devolve como quiser), e isso aparecia como
+      // etiqueta "embaralhada" no Excel. Id crescente = ordem em que foi criado.
       .orderBy('b.production_date', 'desc')
+      .orderBy('b.id', 'asc')
 
     // Filtros
     if (formula_id) {
