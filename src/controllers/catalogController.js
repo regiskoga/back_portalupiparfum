@@ -41,7 +41,11 @@ async function list(req, res) {
       })
     }
 
-    const [{ count }] = await query.clone().clearSelect().count('p.id as count')
+    // `clearSelect()` NÃO limpa o ORDER BY: sem `clearOrder()` a contagem vira
+    // `select count(p.id) ... order by p.project_name`, que o Postgres recusa com
+    // 42803 ("must appear in the GROUP BY clause"). Isso derrubava o catálogo
+    // público inteiro com 500, em qualquer cenário, com ou sem produto publicado.
+    const [{ count }] = await query.clone().clearSelect().clearOrder().count('p.id as count')
     const produtos = await query.limit(parseInt(limit)).offset(offset)
 
     if (produtos.length === 0) {
@@ -181,7 +185,10 @@ async function createOrder(req, res) {
           customer_id:  existingCustomer.id,
           code:         `ORD-${Date.now()}`,
           status:       'Pending',
-          channel:      'WhatsApp',
+          // Veio da vitrine, não do WhatsApp. Estava fixo em 'WhatsApp', o que
+          // fazia o relatório por canal creditar ao WhatsApp toda venda do site.
+          // 'Site' já é valor aceito pelo CHECK `orders_channel_check`.
+          channel:      'Site',
           from_catalog: true,
           discount:     0,
           shipping:     0,
