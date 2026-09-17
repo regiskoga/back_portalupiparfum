@@ -340,6 +340,25 @@ exports.list = async (req, res) => {
       .limit(limit)
       .offset(offset)
 
+    // Subtotal dos itens junto da lista. Sem isto a tela só consegue montar o
+    // total depois de expandir a linha (que é quando ela busca os itens), e o
+    // pedido aparece sem valor nenhum na listagem — foi a queixa do cliente em
+    // Pedidos Antigos. Uma query só, limitada à página que acabou de sair.
+    if (orders.length > 0) {
+      const somas = await db('order_items')
+        .whereIn('order_id', orders.map(o => o.id))
+        .groupBy('order_id')
+        .select('order_id')
+        .select(db.raw('SUM(quantity * COALESCE(unit_price, 0)) AS subtotal'))
+        .select(db.raw('COUNT(*) AS itens'))
+      const porPedido = Object.fromEntries(somas.map(r => [r.order_id, r]))
+      for (const o of orders) {
+        const s = porPedido[o.id]
+        o.items_subtotal = s ? Number(s.subtotal) || 0 : 0
+        o.items_count    = s ? Number(s.itens) || 0 : 0
+      }
+    }
+
     let countQuery = db('orders')
     if (status) countQuery = countQuery.where('orders.status', status)
     if (customer_id) countQuery = countQuery.where('orders.customer_id', customer_id)
