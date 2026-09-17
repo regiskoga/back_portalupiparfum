@@ -421,8 +421,11 @@ exports.topCustomers = async (req, res) => {
 // "Não tenho" precisa ser visível como ZERO; sumir da lista é indistinguível de
 // "não existe", e some também da ordenação por estoque (menor → maior).
 //
-// Entra quem já produziu alguma vez (tem lote, mesmo esgotado) ou tem frasco em
-// estoque. Projeto que nunca virou lote nem envase é cadastro, não estoque.
+// Entra TODO projeto cadastrado, inclusive o que nunca virou lote nem envase
+// (29 em produção): o cliente usa esta tela como retrato do catálogo — "por mais
+// que não tenha lote, o projeto já está lançado e eu posso produzir" — e exporta
+// daqui para o Excel. Quem nunca produziu vem com `sem_lote: true`, para a tela
+// distinguir "esgotei" de "nunca produzi", que são coisas diferentes.
 exports.stockOverview = async (req, res) => {
   try {
     const [porProduto, { ready, gifts }] = await Promise.all([
@@ -439,7 +442,6 @@ exports.stockOverview = async (req, res) => {
       const l           = porProduto.get(p.id)
       const ready_units = p.sku ? (ready[p.sku] || 0) : 0
       const gift_units  = p.sku ? (gifts[p.sku] || 0) : 0
-      if (!l && !ready_units && !gift_units) continue
 
       const stock_ml = money(l ? l.ml : 0)
       data.push({
@@ -458,6 +460,9 @@ exports.stockOverview = async (req, res) => {
         ready_units,
         gift_units,
         sem_estoque:        stock_ml === 0 && ready_units === 0 && gift_units === 0,
+        // Nunca produziu: não é "esgotado", é "não comecei". A tela mostra
+        // rótulos diferentes e o filtro do cliente usa este campo.
+        sem_lote:           !l,
         lots:               l ? l.lots : [],
       })
     }
@@ -474,7 +479,10 @@ exports.stockOverview = async (req, res) => {
       totals: {
         listados:      data.length,
         produtos:      comEstoque.length,
-        esgotados:     data.length - comEstoque.length,
+        // "Esgotado" = já produziu e zerou. "Nunca produzido" conta à parte, senão
+        // o cartão de esgotados passa a misturar projeto vendido com projeto novo.
+        esgotados:     data.filter(r => r.sem_estoque && !r.sem_lote).length,
+        sem_lote:      data.filter(r => r.sem_lote).length,
         stock_ml:      money(data.reduce((s, r) => s + r.stock_ml, 0)),
         macerating_ml: money(data.reduce((s, r) => s + r.macerating_ml, 0)),
         batches:       data.reduce((s, r) => s + r.batches, 0),
