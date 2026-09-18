@@ -1102,25 +1102,27 @@ async function processPedidosAntigos (trx, rows, dryRun) {
       continue
     }
 
-    // Monta os itens antes de tocar no banco — pedido sem item válido não entra.
+    // Monta os itens antes de tocar no banco — pedido sem item válido não entra,
+    // e pedido com item inválido também não: ver a guarda logo depois do laço.
     const itens = []
+    let linhasRuins = 0
     for (const r of linhas) {
       const projeto = toString(getCol(r, 'Projeto', 'Perfume', 'Produto'))
       if (!projeto) {
         errors.push({ row: r._row, msg: `Pedido ${code}: Projeto é obrigatório na linha do item` })
-        continue
+        linhasRuins++; continue
       }
       const produto = await findProduct(trx, { projectName: projeto, commercialName: projeto })
       if (!produto) {
         errors.push({ row: r._row, msg: `Pedido ${code}: projeto "${projeto}" não encontrado — cadastre na aba Projetos primeiro` })
-        continue
+        linhasRuins++; continue
       }
       const volume = toNumber(getCol(r, 'Volume (ml)', 'Volume', 'Vol'))
       const qtd    = toNumber(getCol(r, 'Quantidade', 'Qtd'))
       const preco  = toNumber(getCol(r, 'Preço Unitário (R$)', 'Preco Unitario (R$)', 'Preço Unitário', 'Preco Unitario', 'Valor Unitário'))
       if (!(qtd > 0)) {
         errors.push({ row: r._row, msg: `Pedido ${code}: Quantidade inválida (precisa ser maior que zero)` })
-        continue
+        linhasRuins++; continue
       }
       // Preço em branco (célula vazia, fórmula quebrada, '#REF!') entrava calado
       // como 0 e o pedido inteiro ficava sem valor nenhum — foi assim que 702 dos
@@ -1129,7 +1131,7 @@ async function processPedidosAntigos (trx, rows, dryRun) {
       // erro é o campo em branco, que `toNumber` devolve como null.
       if (preco == null) {
         errors.push({ row: r._row, msg: `Pedido ${code}: Preço Unitário em branco ou inválido no item "${projeto}" — se foi de graça, preencha 0` })
-        continue
+        linhasRuins++; continue
       }
       itens.push({
         product_id:   produto.id,
@@ -1144,6 +1146,19 @@ async function processPedidosAntigos (trx, rows, dryRun) {
 
     if (itens.length === 0) {
       errors.push({ row: primeira._row, msg: `Pedido ${code}: nenhum item válido — pedido ignorado` })
+      continue
+    }
+
+    // Pedido PARCIAL não entra. Antes, uma linha ruim no meio derrubava só aquele
+    // perfume e o pedido era criado com as outras — entrando no sistema com valor
+    // MENOR que a venda real. Como `is_legacy` conta nos relatórios por padrão
+    // (`include_legacy` = true), isso virava faturamento histórico errado, e a linha
+    // de erro passava batido no meio de uma carga de mil pedidos.
+    // Mesmo princípio da guarda acima: pedido que não dá para representar inteiro
+    // não é importado. Corrigir o nome na planilha e reimportar resolve — a
+    // reimportação casa por código e atualiza em vez de duplicar.
+    if (linhasRuins > 0) {
+      errors.push({ row: primeira._row, msg: `Pedido ${code}: ${linhasRuins} linha(s) com problema acima — pedido NÃO importado (entraria com valor menor que a venda real). Corrija a(s) linha(s) e reimporte.` })
       continue
     }
 
