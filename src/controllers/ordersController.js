@@ -877,13 +877,13 @@ exports.getAutomaticOrders = async (req, res) => {
         .leftJoin('formulas', 'production_orders.formula_id', 'formulas.id')
         .leftJoin('products', 'formulas.product_id', 'products.id')
         .where('production_orders.order_id', id)
-        .select('production_orders.*', 'products.name as product_name'),
+        .select('production_orders.*', 'products.project_name as product_name'),
 
       db('bottling_orders')
         .leftJoin('products', 'bottling_orders.product_id', 'products.id')
         .leftJoin('batches', 'bottling_orders.batch_id', 'batches.id')
         .where('bottling_orders.order_id', id)
-        .select('bottling_orders.*', 'products.name as product_name', 'batches.code as batch_code'),
+        .select('bottling_orders.*', 'products.project_name as product_name', 'batches.batch_code as batch_code'),
 
       db('purchase_orders')
         .leftJoin('supplies', 'purchase_orders.supply_id', 'supplies.id')

@@ -47,7 +47,8 @@ class SystemRulesController {
       // Paginação
       const offset = (page - 1) * limit;
       const totalQuery = query.clone();
-      const total = await totalQuery.count('* as count').first();
+      // Ver comentario em catalogController: count(*) sobre SELECT com colunas da 42803.
+      const total = await totalQuery.clearSelect().clearOrder().count('* as count').first();
       
       const rules = await query
         .orderBy('category')

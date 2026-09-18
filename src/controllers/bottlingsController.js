@@ -571,7 +571,9 @@ async function remove(req, res) {
 // ─── BOTTLING STATS ───────────────────────────────────────────────────────────
 async function stats(req, res) {
   try {
-    const [totals] = await db('bottlings')
+    // `.first()` devolve um OBJETO, nao um array — destructuring de array aqui da
+    // "(intermediate value) is not iterable" e derruba o endpoint com 500.
+    const totals = await db('bottlings')
       .count('* as total_bottlings')
       .sum('quantity as total_units_produced')
       .sum('total_cost as total_bottling_cost')

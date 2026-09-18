@@ -35,7 +35,10 @@ async function list(req, res) {
     
     // Contar total
     const totalQuery = query.clone()
-    const [{ count: total }] = await totalQuery.count('* as count')
+    // `clearSelect()` nao limpa o ORDER BY, e o SELECT com colunas nao sobrevive a
+    // um count(*): sem os dois, o Postgres recusa com 42803 ("must appear in the
+    // GROUP BY clause") e a listagem inteira vira 500. Mesmo defeito do catalogo.
+    const [{ count: total }] = await totalQuery.clearSelect().clearOrder().count('* as count')
     
     // Aplicar paginação
     const occurrences = await query
@@ -394,7 +397,7 @@ async function stats(req, res) {
       query = query.where('created_at', '<=', end_date)
     }
     
-    const [totals] = await query.clone()
+    const totals = await query.clone()
       .count('* as total_occurrences')
       .sum('credit_amount as total_credits')
       .first()

@@ -23,7 +23,7 @@ exports.list = async (req, res) => {
       .select(
         'donations.*',
         'customers.name as customer_name',
-        'products.name as product_full_name'
+        'products.project_name as product_full_name'
       )
 
     if (donation_type) {
@@ -79,7 +79,7 @@ exports.getById = async (req, res) => {
         'donations.*',
         'customers.name as customer_name',
         'customers.email as customer_email',
-        'products.name as product_full_name'
+        'products.project_name as product_full_name'
       )
       .first()
 
@@ -340,7 +340,7 @@ exports.getByCustomer = async (req, res) => {
       .where('donations.customer_id', customer_id)
       .select(
         'donations.*',
-        'products.name as product_full_name'
+        'products.project_name as product_full_name'
       )
       .orderBy('donations.donated_at', 'desc')
 
