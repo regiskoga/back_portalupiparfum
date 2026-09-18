@@ -1268,14 +1268,31 @@ async function processAll (parsed, dryRun, sheetName = null) {
   supplierCache.clear()
   const result = {}
   const sheetsToProcess = sheetName ? [sheetName] : Object.keys(SHEET_PROCESSORS)
+
+  // O dry-run ESCREVE e dá rollback — não é "não escreve".
+  //
+  // Antes, os processadores recebiam dryRun=true e pulavam os próprios inserts. Com
+  // isso a prévia ficava cega para o que a própria planilha criaria na mesma passada:
+  // uma planilha que traz o Projeto E o Pedido Antigo que o usa acusava
+  // 'projeto "X" não encontrado' e contava 0 pedidos, e depois o commit importava
+  // normalmente. O operador lia "erro" numa carga que estava certa.
+  //
+  // A transação abaixo já revertia tudo no dry-run; o `if (!dryRun)` dentro dos
+  // processadores era uma segunda trava, redundante e mentirosa. Passando `false`
+  // adiante, cada processador enxerga o que o anterior acabou de criar, e o rollback
+  // continua sendo a única coisa que impede a prévia de persistir.
+  //
+  // Seguro porque: nenhum processador escreve fora da `trx` (todos recebem `trx`), e
+  // nenhum tem efeito colateral fora do banco — sem ActivityLogger, sem broadcast SSE,
+  // sem arquivo, sem HTTP. O único resíduo é o avanço das sequences de id, inofensivo.
   await db.transaction(async (trx) => {
     for (const s of sheetsToProcess) {
       const cfg = SHEET_PROCESSORS[s]
       if (!cfg) continue
       const rows = parsed[s] || []
       result[s] = cfg.opts
-        ? await cfg.fn(trx, rows, dryRun, cfg.opts)
-        : await cfg.fn(trx, rows, dryRun)
+        ? await cfg.fn(trx, rows, false, cfg.opts)
+        : await cfg.fn(trx, rows, false)
     }
     if (dryRun) throw new Error('__DRY_RUN_ROLLBACK__')
   }).catch(err => {
