@@ -1195,9 +1195,34 @@ async function processPedidosAntigos (trx, rows, dryRun) {
 }
 
 function parseWorkbook (buffer) {
-  const wb = xlsx.read(buffer, { type: 'buffer', cellDates: false })
+  // Arquivo errado tem que dizer "arquivo errado". Antes desta guarda, planilha vazia
+  // ou texto puro renomeado passavam e devolviam 200 com todas as abas zeradas — o
+  // operador lia "importação concluída, 0 registros" e concluía que a planilha estava
+  // vazia, quando na verdade tinha subido o arquivo errado. `preview` e `commit` já
+  // devolvem 400 com a mensagem do throw.
+  if (!buffer || buffer.length === 0) {
+    throw new Error('Arquivo vazio (0 bytes). Envie a planilha .xlsx preenchida.')
+  }
+
+  let wb
+  try {
+    wb = xlsx.read(buffer, { type: 'buffer', cellDates: false })
+  } catch (e) {
+    throw new Error('Não foi possível ler o arquivo como planilha. Baixe o modelo em ' +
+      '"Baixar modelo" e envie um .xlsx.')
+  }
+
+  const conhecidas = Object.keys(TEMPLATE)
+  const presentes = (wb.SheetNames || []).filter(n => conhecidas.includes(n))
+  if (presentes.length === 0) {
+    const achadas = (wb.SheetNames || []).slice(0, 5).join(', ') || 'nenhuma'
+    throw new Error(
+      `O arquivo não tem nenhuma aba do modelo de importação. Abas encontradas: ${achadas}. ` +
+      `Esperado ao menos uma de: ${conhecidas.join(', ')}. Baixe o modelo em "Baixar modelo".`)
+  }
+
   const out = {}
-  for (const sheetName of Object.keys(TEMPLATE)) {
+  for (const sheetName of conhecidas) {
     const ws = wb.Sheets[sheetName]
     out[sheetName] = ws ? sheetToRows(ws) : []
   }
