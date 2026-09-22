@@ -552,4 +552,117 @@ exports.stockOverview = async (req, res) => {
   }
 }
 
+// ─── 4. BALANCETE MENSAL ──────────────────────────────────────────────────────
+// Pedido do cliente (21/09/2026, áudios): "eu não tenho realmente o balancete do
+// quanto eu gasto no mês, e quanto tá entrando de dinheiro... e aí ele me dá um
+// balancete final com as vendas pra eu ver quanto que realmente teve de lucro."
+//
+// ⚠️ ISTO É REGIME DE CAIXA, NÃO CUSTO DO PRODUTO VENDIDO. A coluna de saídas é
+// o que ele PAGOU no mês (`supplies.purchase_date` + despesas manuais), não o
+// custo do que saiu pela porta. Comprar 2 mil reais de essência em setembro
+// aparece todo em setembro, mesmo que vire perfume em dezembro. Some-se a isso
+// que álcool e água ficam fora do cadastro por opção dele, e o resultado NÃO é
+// margem do produto — a tela diz isso em letras, porque a pergunta que ele fez
+// ("lucro real") é justamente a que este número não responde sozinho.
+//
+// Entradas usam `created_at` do pedido: é a data que TODO pedido tem. Só 80 dos
+// 95 pedidos do sistema têm `payment_date`, então pagar por data de pagamento
+// perderia pedido. Os 1.014 antigos têm datas reais espalhadas de fev a ago/2026
+// (~105 por mês), ou seja, são vendas daqueles meses — entram por padrão, e o
+// `include_legacy=false` isola o que o sistema vendeu, igual às outras abas.
+exports.balancete = async (req, res) => {
+  try {
+    const month = String(req.query.month || '').trim()
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ error: 'Informe o mês no formato YYYY-MM' })
+    }
+    const [ano, mes] = month.split('-').map(Number)
+    const inicio = `${month}-01`
+    const fim    = `${month}-${String(new Date(ano, mes, 0).getDate()).padStart(2, '0')}`
+    const incluirLegado = wantsLegacy(req.query)
+
+    // ── ENTRADAS: vendas do mês ───────────────────────────────────────────────
+    let qPedidos = db('orders as o')
+      .whereIn('o.status', SOLD_STATUSES)
+      .where('o.created_at', '>=', inicio)
+      .where('o.created_at', '<=', `${fim} 23:59:59`)
+      .select('o.id', 'o.discount', 'o.coupon_discount', 'o.shipping', 'o.amount_paid', 'o.is_legacy')
+    qPedidos = legacyFilter(qPedidos, 'o.is_legacy', incluirLegado)
+    const pedidos = await qPedidos
+
+    const subtotais = pedidos.length > 0
+      ? await db('order_items').whereIn('order_id', pedidos.map(p => p.id))
+          .groupBy('order_id').select('order_id')
+          .select(db.raw('SUM(quantity * unit_price) AS subtotal'))
+      : []
+    const subtotalPorPedido = Object.fromEntries(subtotais.map(r => [r.order_id, parseFloat(r.subtotal || 0)]))
+
+    let vendido = 0, recebido = 0
+    for (const p of pedidos) {
+      const total = (subtotalPorPedido[p.id] || 0)
+        - parseFloat(p.discount || 0) - parseFloat(p.coupon_discount || 0) + parseFloat(p.shipping || 0)
+      vendido += total
+      // Mesma regra da aba Clientes: pedido antigo sem pagamento registrado
+      // conta como quitado (ver topCustomers).
+      recebido += p.amount_paid != null ? parseFloat(p.amount_paid) : (p.is_legacy ? total : 0)
+    }
+
+    // ── SAÍDAS 1: compras de insumo cadastradas ───────────────────────────────
+    // `total_amount_paid` e não quantidade × custo unitário: é o que ele pagou de
+    // fato, com frete e arredondamento de negociação dentro. Somar o derivado
+    // faria o relatório discordar do extrato dele.
+    const compras = await db('supplies')
+      .whereNotNull('purchase_date')
+      .where('purchase_date', '>=', inicio).where('purchase_date', '<=', fim)
+      .groupBy('type').select('type')
+      .select(db.raw('COUNT(*)::int AS itens'))
+      .select(db.raw('COALESCE(SUM(total_amount_paid), 0) AS valor'))
+    const comprasPorTipo = compras.map(c => ({
+      type: c.type || 'Sem tipo', itens: c.itens, valor: money(c.valor),
+    })).sort((a, b) => b.valor - a.valor)
+    const totalCompras = comprasPorTipo.reduce((s, c) => s + c.valor, 0)
+
+    // ── SAÍDAS 2: despesas lançadas à mão ─────────────────────────────────────
+    const despesas = await db('monthly_expenses')
+      .where('expense_date', '>=', inicio).where('expense_date', '<=', fim)
+      .orderBy('expense_date', 'desc').orderBy('id', 'desc')
+      .select('*')
+    const totalDespesas = despesas.reduce((s, d) => s + parseFloat(d.amount || 0), 0)
+
+    const despesasPorCategoria = Object.values(
+      despesas.reduce((acc, d) => {
+        const k = (d.category || '').trim() || 'Sem categoria'
+        acc[k] = acc[k] || { category: k, itens: 0, valor: 0 }
+        acc[k].itens += 1
+        acc[k].valor += parseFloat(d.amount || 0)
+        return acc
+      }, {})
+    ).map(c => ({ ...c, valor: money(c.valor) })).sort((a, b) => b.valor - a.valor)
+
+    const saidas = money(totalCompras + totalDespesas)
+    res.json({
+      month,
+      include_legacy: incluirLegado,
+      entradas: {
+        vendido:  money(vendido),
+        recebido: money(recebido),
+        pedidos:  pedidos.length,
+        pedidos_antigos: pedidos.filter(p => p.is_legacy).length,
+      },
+      saidas: {
+        total: saidas,
+        compras: { total: money(totalCompras), por_tipo: comprasPorTipo },
+        manuais: { total: money(totalDespesas), itens: despesas.length, por_categoria: despesasPorCategoria, lista: despesas },
+      },
+      // Resultado sobre o RECEBIDO: é a conta de caixa (o que entrou menos o que
+      // saiu). O vendido a prazo ainda não é dinheiro na mão.
+      resultado: money(recebido - saidas),
+      resultado_por_vendido: money(vendido - saidas),
+    })
+  } catch (e) {
+    console.error('Error building balancete:', e)
+    res.status(500).json({ error: e.message })
+  }
+}
+
 exports.SOLD_STATUSES = SOLD_STATUSES
