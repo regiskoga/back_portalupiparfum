@@ -1,5 +1,5 @@
 const { db } = require('../models/db')
-const { parseEssenceName } = require('../services/essenceName')
+const { parseEssenceName, essenceKeyFromName } = require('../services/essenceName')
 
 // Venda de fato = do Confirmado em diante. Pendente é pré-pedido que ainda pode
 // não virar venda; Cancelado, Abandonado e Perdido não são venda.
@@ -32,8 +32,9 @@ function legacyFilter (query, col, includeLegacy) {
 const wantsLegacy = q => String(q.include_legacy ?? 'true') !== 'false'
 
 // ─── ESSÊNCIA DO PROJETO ──────────────────────────────────────────────────────
-// Não existe vínculo formal entre essência e projeto. Duas fontes, nesta ordem:
-//   'lote'       → essências realmente consumidas em lotes daquele projeto (certo)
+// Três fontes, nesta ordem de prioridade:
+//   'vinculo'    → o usuário vinculou a essência ao projeto (product_essences)
+//   'lote'       → essências realmente consumidas em lotes daquele projeto
 //   'inspiracao' → nome da essência casa com a inspiração do projeto (estimativa)
 // A origem viaja junto com o número para a tela poder marcar o que é estimativa.
 async function buildEssenceIndex () {
@@ -54,7 +55,30 @@ async function buildEssenceIndex () {
     push(porNome, norm(essence))
   }
 
-  // Vínculo certo: supply_ids que já entraram em lote de cada produto
+  // Vínculo EXPLÍCITO (`product_essences`): o que o usuário afirmou na tela de
+  // Estoque de Essências. É a fonte mais forte, à frente do histórico de lote:
+  //   1. a chave é a IDENTIDADE da essência (marca+essência), então soma TODAS as
+  //      compras dela; 'lote' só conta os supply_id que já entraram em lote e
+  //      passa a subnotificar assim que chega uma recompra (em produção são 518
+  //      compras para 415 essências distintas);
+  //   2. pega o que a heurística de inspiração erra por grafia — "Narciso
+  //      Rodrigues" (essência) × "Narciso Rodriguez" (inspiração) é um 'z' de
+  //      diferença, e o palpite devolvia nada. Foi esse o caso relatado.
+  // A chave vem pronta do banco; casa string com string, sem refazer normalização.
+  const porChave = new Map()
+  for (const e of essencias) {
+    const k = essenceKeyFromName(e.name)
+    if (!porChave.has(k)) porChave.set(k, [])
+    porChave.get(k).push(e)
+  }
+  const vinculos = await db('product_essences').select('product_id', 'essence_key')
+  const chavesPorProduto = new Map()
+  for (const v of vinculos) {
+    if (!chavesPorProduto.has(v.product_id)) chavesPorProduto.set(v.product_id, [])
+    chavesPorProduto.get(v.product_id).push(v.essence_key)
+  }
+
+  // Vínculo por consumo: supply_ids que já entraram em lote de cada produto
   const usadas = await db('batch_essences as be')
     .join('batches as b', 'b.id', 'be.batch_id')
     .whereNotNull('b.product_id')
@@ -112,6 +136,27 @@ async function buildEssenceIndex () {
       essence_batch_base: regua ? regua.base : null,
     }
     const lotesPossiveis = ml => (regua && ml != null ? Math.floor(ml / regua.ml) : null)
+
+    // 1º: o que o usuário vinculou à mão. Uma chave pode cair em várias compras
+    // da mesma essência — dedup por id de supply para não somar a mesma compra
+    // duas vezes. Se o vínculo existir mas nenhuma compra casar (essência apagada
+    // depois de vinculada), cai para as fontes de baixo em vez de devolver zero.
+    const chaves = chavesPorProduto.get(product.id)
+    if (chaves && chaves.length > 0) {
+      const achadas = [...new Map(
+        chaves.flatMap(k => porChave.get(k) || []).map(e => [e.id, e])
+      ).values()]
+      if (achadas.length > 0) {
+        const ml = achadas.reduce((s, e) => s + parseFloat(e.quantity_available || 0), 0)
+        return {
+          ...base,
+          essence_ml:       ml,
+          essence_source:   'vinculo',
+          essence_count:    achadas.length,
+          batches_possible: lotesPossiveis(ml),
+        }
+      }
+    }
 
     const ids = porProduto.get(product.id)
     if (ids && ids.length > 0) {
@@ -351,7 +396,18 @@ exports.topCustomers = async (req, res) => {
         - parseFloat(p.discount || 0)
         - parseFloat(p.coupon_discount || 0)
         + parseFloat(p.shipping || 0)
-      const pago = p.amount_paid == null ? null : parseFloat(p.amount_paid)
+      // Pedido antigo (importado por planilha) chega SEM pagamento registrado —
+      // em produção os 1.014 têm `amount_paid` nulo, sem exceção. Como eles são
+      // histórico de venda já entregue, contá-los pelo saldo punha R$ 117 mil de
+      // dívida fantasma no cartão "Em aberto", contra R$ 2 mil de dívida real.
+      // Decisão do usuário (22/09/2026): pedido antigo sem pagamento registrado
+      // vale como QUITADO — assim Vendido continua igual a Recebido + Em aberto.
+      // A guarda é o `amount_paid == null` junto: no dia em que alguém registrar
+      // o pagamento (parcial, inclusive) de um pedido importado, quem manda é o
+      // valor registrado, não esta regra.
+      const pago = p.amount_paid != null
+        ? parseFloat(p.amount_paid)
+        : (p.is_legacy ? total : null)
 
       const key = p.customer_id || 0
       let c = clientes.get(key)
