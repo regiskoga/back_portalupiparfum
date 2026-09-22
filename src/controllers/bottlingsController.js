@@ -8,14 +8,19 @@ async function getParam (key, defaultValue) {
 
 // Recalcula os custos agregados do envase a partir dos lotes vinculados.
 // liquid_cost = soma dos proportional_cost dos bottling_batches (cost_per_ml×ml_used);
-// total_cost = líquido + frasco + rótulo; unit_cost = total / quantidade.
+// total_cost = líquido + frasco + rótulo + custos diversos; unit_cost = total / qtd.
 // Mantém o custo coerente quando o usuário troca o lote de origem por link/unlink.
+//
+// `extra_cost` entra da LINHA, não do parâmetro: quem já nasceu sem custo extra
+// (todo o histórico) continua sem ele mesmo depois de um relink, e quem nasceu
+// com R$ 4 mantém os R$ 4 mesmo que o parâmetro mude depois.
 async function recalcBottlingCost (trx, bottlingId) {
   const bt = await trx('bottlings').where('id', bottlingId).first()
   if (!bt) return
   const agg = await trx('bottling_batches').where('bottling_id', bottlingId).sum({ liq: 'proportional_cost' })
   const liquid = parseFloat((agg[0] && agg[0].liq) || 0)
   const total = liquid + parseFloat(bt.bottle_cost || 0) + parseFloat(bt.label_cost || 0)
+    + parseFloat(bt.extra_cost || 0)
   const qty = parseInt(bt.quantity) || 0
   await trx('bottlings').where('id', bottlingId).update({
     liquid_cost: liquid,
@@ -313,7 +318,15 @@ async function create(req, res) {
         })
       }
       
-      const totalCost = liquidCost + bottleCost + labelCost
+      // Custos diversos: impressão de etiqueta e o resto do trabalho por frasco,
+      // que não está em nenhum insumo cadastrado. Por UNIDADE e independente do
+      // volume — é mão de obra, não material. Lido do parâmetro na hora de criar
+      // e CONGELADO na linha: mudar o parâmetro amanhã não pode reescrever o
+      // custo de um envase que já virou preço.
+      const extraPorUnidade = parseFloat(await getParam('extra_cost_per_bottle', 0)) || 0
+      const extraCost = extraPorUnidade * parseInt(quantity)
+
+      const totalCost = liquidCost + bottleCost + labelCost + extraCost
       const unitCost = totalCost / parseInt(quantity)
       
       // Criar envase
@@ -329,6 +342,7 @@ async function create(req, res) {
         liquid_cost: liquidCost,
         bottle_cost: bottleCost,
         label_cost: labelCost,
+        extra_cost: extraCost,
         total_cost: totalCost,
         unit_cost: unitCost,
         quantity_available: parseInt(quantity),
@@ -454,6 +468,7 @@ async function update(req, res) {
     delete updateData.liquid_cost
     delete updateData.bottle_cost
     delete updateData.label_cost
+    delete updateData.extra_cost
     delete updateData.total_cost
     delete updateData.unit_cost
 
