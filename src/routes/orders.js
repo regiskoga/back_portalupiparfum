@@ -240,6 +240,21 @@ router.patch(
 )
 
 /**
+ * PATCH /api/orders/:id/discount
+ * Desconto do pedido, sem passar pelo /status (que tem efeito colateral de
+ * estoque e revalidacao de envase). Recusa pedido em fase final.
+ */
+router.patch(
+  '/:id/discount',
+  [
+    param('id').isInt(),
+    body('discount').isFloat({ min: 0 }).withMessage('discount must be a positive number'),
+  ],
+  validate,
+  ordersController.updateDiscount
+)
+
+/**
  * PATCH /api/orders/:id/freight
  * Atualiza frete (valor + tipo) em qualquer fase antes de concluído
  */

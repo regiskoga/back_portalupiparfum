@@ -1255,6 +1255,62 @@ exports.applyCoupon = async (req, res) => {
  * Bloqueado quando Entregue ou Cancelado. Mantém o padrão de broadcast SSE +
  * activity log das demais mutações de pedido.
  */
+/**
+ * Desconto do pedido — endpoint próprio.
+ *
+ * Antes a tela editava o desconto REENVIANDO `PATCH /:id/status` com o mesmo
+ * status. Isso só é inócuo em Pendente e Confirmado: em 'Ready' o updateStatus
+ * revalida os vínculos de envase toda vez, e salvar um desconto voltava "item
+ * sem envase suficiente". Por isso o botão ficava travado nas demais fases.
+ *
+ * Pedido do usuário (23/09/2026): lançar desconto em todas as fases menos as
+ * finais. Com endpoint próprio isso sai sem encostar em estoque nem em status.
+ *
+ * O desconto SEMPRE abate do total — total = Σ(preço × qtd) − discount − cupom
+ * + frete, a mesma conta da tela, dos relatórios e do balancete. E como
+ * "em aberto" é total − pago, mexer aqui muda junto o que falta receber.
+ *
+ * Atenção: `orders.discount` também carrega o Σ(Desc./item × qtd) somado na
+ * criação (regra de 14/09). Gravar um valor novo SUBSTITUI esse total — é o
+ * comportamento que a tela já tinha e o modal avisa em letras.
+ */
+exports.updateDiscount = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { discount } = req.body
+
+    const order = await db('orders').where({ id }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+
+    const FINAIS = ['Delivered', 'Cancelled', 'Lost', 'Abandoned', 'Finalizado']
+    if (FINAIS.includes(order.status)) {
+      return res.status(400).json({
+        error: 'Desconto não pode ser alterado em pedido finalizado (Entregue, Cancelado, Perdido ou Carrinho abandonado)',
+      })
+    }
+
+    const novo = Math.max(0, parseFloat(discount) || 0)
+    const [updated] = await db('orders')
+      .where({ id })
+      .update({ discount: novo, updated_at: db.fn.now() })
+      .returning('*')
+
+    // A base da comissão do parceiro é "perfumes − desconto − cupom", e o cupom
+    // percentual também depende do subtotal: mudar o desconto muda os dois.
+    await recalcOrderCommission(parseInt(id))
+
+    await activityLogger.log('order_updated', 'order', id, {
+      description: `Desconto do pedido ${order.code} alterado para ${novo}`,
+    })
+
+    events.broadcast('orders-changed', { id: parseInt(id), action: 'discount-updated' })
+    res.json(updated)
+  } catch (error) {
+    console.error('Error updating order discount:', error)
+    res.status(500).json({ error: error.message })
+  }
+}
+
 exports.updateFreight = async (req, res) => {
   try {
     const { id } = req.params
