@@ -946,7 +946,14 @@ exports.updateItem = async (req, res) => {
 
     const order = await db('orders').where({ id: orderId }).first()
     if (!order) return res.status(404).json({ error: 'Order not found' })
-    if (!['Pending', 'Confirmed'].includes(order.status)) {
+    // Pedido ANTIGO (importado por planilha) é livro-caixa, não pedido operacional:
+    // ele nunca teve vínculo com envase — em produção são 2.846 itens importados com
+    // ZERO linhas em `order_item_bottlings`, contra 377 dos pedidos do sistema. A
+    // trava existe para não editar pedido que já moveu estoque; como aqui não há
+    // estoque para mover, ela só impedia o usuário de corrigir erro da própria
+    // planilha. Ele carrega `stock_decremented = true`, mas sem nenhum vínculo para
+    // reverter. Para pedido do sistema nada muda.
+    if (!order.is_legacy && !['Pending', 'Confirmed'].includes(order.status)) {
       return res.status(400).json({ error: 'Só é possível editar itens quando o pedido está Pendente ou Confirmado' })
     }
 
@@ -1325,7 +1332,9 @@ exports.addItem = async (req, res) => {
     // Só em Pending E com estoque ainda não reservado. Um pedido regredido de
     // Confirmado tem o estoque restaurado (stock_decremented=false) — a checagem
     // extra é blindagem contra qualquer caminho que deixe Pending decrementado.
-    if (order.status !== 'Pending' || order.stock_decremented) {
+    // Pedido ANTIGO é exceção: não tem vínculo de envase nenhum, então não há
+    // estoque reservado de verdade para proteger (ver nota em updateItem).
+    if (!order.is_legacy && (order.status !== 'Pending' || order.stock_decremented)) {
       await trx.rollback()
       return res.status(400).json({ error: 'Só é possível adicionar itens enquanto o pedido está Pendente (sem estoque reservado)' })
     }
@@ -1384,7 +1393,9 @@ exports.removeItem = async (req, res) => {
     const order = await trx('orders').where({ id: orderId }).first()
     if (!order) { await trx.rollback(); return res.status(404).json({ error: 'Order not found' }) }
     // Só em Pending E sem estoque reservado (ver nota em addItem).
-    if (order.status !== 'Pending' || order.stock_decremented) {
+    // Pedido ANTIGO é exceção pelo mesmo motivo: sem vínculo de envase, não há
+    // estoque para devolver ao remover a linha.
+    if (!order.is_legacy && (order.status !== 'Pending' || order.stock_decremented)) {
       await trx.rollback()
       return res.status(400).json({ error: 'Só é possível remover itens enquanto o pedido está Pendente (sem estoque reservado)' })
     }
