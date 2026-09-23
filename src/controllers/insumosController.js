@@ -10,7 +10,21 @@ async function list (req, res) {
   try {
     const { type, supplier_id, busca, ordem = 'created_at', dir = 'DESC', page = 1, limit = 20 } = req.query
 
-    const offset = (Math.max(1, Number(page)) - 1) * Number(limit)
+    // `limit=all` devolve a lista inteira, sem paginar.
+    //
+    // Existe porque os SELETORES de insumo (essência no lote, frasco e rótulo no
+    // envase, ingrediente na fórmula) filtram no CLIENTE, sobre o que já foi
+    // carregado: se a lista vem cortada, o item não "some com erro", ele deixa de
+    // existir para aquela tela e a busca responde "nenhum resultado encontrado".
+    //
+    // Foi o bug da essência Libre (23/09/2026): a tela de Lotes chutava
+    // `limit=500`, o cadastro passou de 500 essências abertas em setembro (520), e
+    // as 20 do fim do alfabeto sumiram. Como o nome começa pela MARCA, o corte caiu
+    // inteiro em Xerjoff e Yves Saint Laurent — todas as seis "Libre".
+    // Um teto maior só adia: são ~85 essências novas por mês.
+    const semLimite = String(limit).toLowerCase() === 'all'
+    const tamanho   = semLimite ? null : Math.max(1, Number(limit) || 20)
+    const offset    = semLimite ? 0 : (Math.max(1, Number(page)) - 1) * tamanho
 
     // Build query
     let query = db('supplies as s')
@@ -44,18 +58,17 @@ async function list (req, res) {
     const orderCol = orderMap[ordem] || 's.created_at'
     const orderDir = dir === 'ASC' ? 'asc' : 'desc'
 
-    const rows = await query
-      .orderBy(orderCol, orderDir)
-      .limit(Number(limit))
-      .offset(offset)
+    let paginada = query.orderBy(orderCol, orderDir)
+    if (!semLimite) paginada = paginada.limit(tamanho).offset(offset)
+    const rows = await paginada
 
     const data = rows.map(r => ({ ...r, purchase_classification: classifyPurchase(r) }))
 
     res.json({
       data,
       total: Number(total),
-      page: Number(page),
-      limit: Number(limit)
+      page: semLimite ? 1 : Number(page),
+      limit: semLimite ? Number(total) : tamanho
     })
   } catch (e) {
     res.status(500).json({ error: e.message })

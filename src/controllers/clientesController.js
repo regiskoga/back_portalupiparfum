@@ -34,7 +34,15 @@ async function list (req, res) {
   try {
     const { busca, page = 1, limit = 20, ordem = 'name', dir = 'ASC', incluir_inativos } = req.query
 
-    const offset = (Math.max(1, Number(page)) - 1) * Number(limit)
+    // `limit=all` devolve a lista inteira — mesmo contrato de `/supplies`, e pelo
+    // mesmo motivo: o seletor de cliente do pedido busca no CLIENTE, sobre o que
+    // foi carregado. Com a lista cortada o cliente não dá erro, ele simplesmente
+    // não aparece. Em 23/09/2026 eram 422 clientes contra o `limit=500` chutado na
+    // tela de Vendas — perto demais para deixar como está, já que foi exatamente
+    // assim que a essência Libre sumiu do lote quando as essências passaram de 500.
+    const semLimite = String(limit).toLowerCase() === 'all'
+    const tamanho   = semLimite ? null : Math.max(1, Number(limit) || 20)
+    const offset    = semLimite ? 0 : (Math.max(1, Number(page)) - 1) * tamanho
 
     // Build base query
     let query = db('customers as c')
@@ -83,10 +91,9 @@ async function list (req, res) {
     const orderCol = orderMap[ordem] || 'c.name'
     const orderDir = dir === 'DESC' ? 'desc' : 'asc'
 
-    const rows = await query
-      .orderBy(orderCol, orderDir)
-      .limit(Number(limit))
-      .offset(offset)
+    let paginada = query.orderBy(orderCol, orderDir)
+    if (!semLimite) paginada = paginada.limit(tamanho).offset(offset)
+    const rows = await paginada
 
     // Calculate total_spent for each customer (simplified - could be optimized)
     for (const row of rows) {
@@ -101,7 +108,12 @@ async function list (req, res) {
       row.total_spent = total_spent || 0
     }
 
-    res.json({ data: rows, total: Number(total), page: Number(page), limit: Number(limit) })
+    res.json({
+      data: rows,
+      total: Number(total),
+      page: semLimite ? 1 : Number(page),
+      limit: semLimite ? Number(total) : tamanho,
+    })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
