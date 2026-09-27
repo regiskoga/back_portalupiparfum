@@ -18,6 +18,12 @@ async function update (req, res) {
 
     await db.transaction(async trx => {
       for (const [key, value] of Object.entries(updates)) {
+        // Valor vazio nunca sobrescreve o que está gravado. Protege os parâmetros
+        // de texto (ex. `order_summary_footer`, o rodapé do resumo do pedido) de
+        // um cliente desatualizado que ainda renderize o campo como número e mande
+        // "" no PUT — o que apagaria o texto inteiro. Nenhum parâmetro tem valor
+        // vazio legítimo, então a regra vale para todos.
+        if (String(value ?? '').trim() === '') continue
         await trx('parameters')
           .where('key', key)
           .update({ value: String(value), updated_at: trx.fn.now() })
