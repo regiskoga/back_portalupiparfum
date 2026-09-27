@@ -665,4 +665,242 @@ exports.balancete = async (req, res) => {
   }
 }
 
+// ─── 5. HISTÓRICO DO CLIENTE ──────────────────────────────────────────────────
+// "Quais perfumes esta pessoa já comprou, e o que eu já mandei de brinde?"
+// Antes disso a resposta exigia abrir pedido por pedido — o maior cliente tem 52
+// pedidos e 117 perfumes distintos, então na prática ele consultava a planilha
+// velha. Serve para dois usos que ele nomeou: entender o gosto (para mandar
+// mostra parecida) e não repetir brinde.
+//
+// Agrupa por PROJETO, com detalhe por volume. Os 3.305 itens de pedido têm
+// `product_id` — inclusive os 2.846 importados da planilha —, então o histórico
+// inteiro agrupa por projeto sem depender do nome digitado.
+//
+// ⚠️ BRINDE VEM DE DUAS FONTES, e a origem viaja junto com o número (como a
+// essência do projeto faz), porque uma delas é interpretação:
+//   'registrado' → `order_gifts`, o brinde de verdade da era do sistema (19 em
+//                  produção). Liga ao projeto por `bottlings.product_ref =
+//                  products.sku`, nunca por `order_items` (fan-out).
+//   'historico'  → item de pedido com `unit_price = 0`. São 798 em produção,
+//                  todos em pedido antigo: é como o brinde aparecia na planilha.
+//                  Decisão do usuário (27/09/2026): preço zero = brinde.
+// Item de preço zero NÃO entra em `units`/`revenue` — senão o "comprou" mistura
+// com o "ganhou", que é exatamente a distinção que ele precisa ver.
+exports.customerHistory = async (req, res) => {
+  try {
+    const customerId = parseInt(req.query.customer_id)
+    if (!Number.isInteger(customerId)) {
+      return res.status(400).json({ error: 'Informe o cliente (customer_id)' })
+    }
+    const { start, end } = req.query
+    const incluirLegado = wantsLegacy(req.query)
+
+    const cliente = await db('customers').where('id', customerId)
+      .select('id', 'name', 'phone', 'email', 'city', 'state', 'active').first()
+    if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado' })
+
+    // ── Itens comprados e brindes de histórico (preço zero) ───────────────────
+    let qItens = db('order_items as oi')
+      .join('orders as o', 'o.id', 'oi.order_id')
+      .where('o.customer_id', customerId)
+      .whereIn('o.status', SOLD_STATUSES)
+      .whereNotNull('oi.product_id')
+      .select('oi.product_id', 'oi.volume_ml', 'oi.quantity', 'oi.unit_price',
+              'o.id as order_id', 'o.code', 'o.created_at', 'o.is_legacy')
+    qItens = periodFilter(qItens, 'o.created_at', { start, end })
+    qItens = legacyFilter(qItens, 'o.is_legacy', incluirLegado)
+    const itens = await qItens
+
+    // ── Brindes registrados (order_gifts → bottlings → products por sku) ──────
+    let qBrindes = db('order_gifts as g')
+      .join('orders as o', 'o.id', 'g.order_id')
+      .join('bottlings as b', 'b.id', 'g.bottling_id')
+      .leftJoin('products as p', 'p.sku', 'b.product_ref')
+      .where('o.customer_id', customerId)
+      .whereIn('o.status', SOLD_STATUSES)
+      .select('p.id as product_id', 'b.product_name', 'b.volume_ml', 'g.quantity',
+              'o.id as order_id', 'o.code', 'o.created_at', 'o.is_legacy')
+    qBrindes = periodFilter(qBrindes, 'o.created_at', { start, end })
+    qBrindes = legacyFilter(qBrindes, 'o.is_legacy', incluirLegado)
+    const brindes = await qBrindes
+
+    // Nº de pedidos do cliente no período (conta o pedido, não a linha)
+    let qPedidos = db('orders as o')
+      .where('o.customer_id', customerId)
+      .whereIn('o.status', SOLD_STATUSES)
+      .select('o.id', 'o.created_at')
+    qPedidos = periodFilter(qPedidos, 'o.created_at', { start, end })
+    qPedidos = legacyFilter(qPedidos, 'o.is_legacy', incluirLegado)
+    const pedidos = await qPedidos
+
+    const ids = [...new Set([
+      ...itens.map(i => i.product_id),
+      ...brindes.map(g => g.product_id),
+    ].filter(Boolean))]
+
+    const produtos = ids.length > 0
+      ? await db('products').whereIn('id', ids)
+          .select('id', 'project_name', 'commercial_name', 'inspiration_brand', 'inspiration_name', 'sku')
+      : []
+    const porId = Object.fromEntries(produtos.map(p => [p.id, p]))
+
+    const linhas = new Map()
+    const novaLinha = (p) => ({
+      product_id:        p.id,
+      sku:               p.sku,
+      project_name:      p.project_name,
+      commercial_name:   p.commercial_name,
+      inspiration_brand: p.inspiration_brand,
+      inspiration_name:  p.inspiration_name,
+      by_volume:         {},
+      other_units:       0,
+      units:             0,        // frascos COMPRADOS (preço > 0)
+      ml:                0,
+      revenue:           0,
+      gift_units:        0,        // frascos recebidos de brinde
+      gift_registered:   0,        // dos quais vieram de order_gifts
+      gift_historic:     0,        // dos quais vieram de item com preço zero
+      orders:            new Set(),
+      first_purchase:    null,
+      last_purchase:     null,
+      lines:             [],       // detalhe expansível, um por pedido/volume
+    })
+
+    const pegaLinha = (produto) => {
+      let row = linhas.get(produto.id)
+      if (!row) { row = novaLinha(produto); linhas.set(produto.id, row) }
+      return row
+    }
+
+    for (const i of itens) {
+      const p = porId[i.product_id]
+      if (!p) continue
+      const row   = pegaLinha(p)
+      const un    = parseInt(i.quantity || 0)
+      const vol   = parseFloat(i.volume_ml || 0)
+      const preco = parseFloat(i.unit_price || 0)
+      const ehBrinde = preco === 0
+
+      if (ehBrinde) {
+        row.gift_units    += un
+        row.gift_historic += un
+      } else {
+        if (VOLUME_COLUMNS.includes(vol)) row.by_volume[vol] = (row.by_volume[vol] || 0) + un
+        else row.other_units += un
+        row.units   += un
+        row.ml      += un * vol
+        row.revenue += un * preco
+      }
+
+      row.orders.add(i.order_id)
+      if (!row.first_purchase || new Date(i.created_at) < new Date(row.first_purchase)) row.first_purchase = i.created_at
+      if (!row.last_purchase  || new Date(i.created_at) > new Date(row.last_purchase))  row.last_purchase  = i.created_at
+      row.lines.push({
+        order_id: i.order_id, code: i.code, created_at: i.created_at,
+        volume_ml: vol, quantity: un, unit_price: money(preco),
+        line_total: money(un * preco),
+        is_legacy: !!i.is_legacy,
+        is_gift: ehBrinde,
+        gift_source: ehBrinde ? 'historico' : null,
+      })
+    }
+
+    // Brinde registrado sem projeto casado (envase cujo `product_ref` não achou
+    // sku) não some: entra como linha própria, identificada pelo nome do envase.
+    const brindesSoltos = []
+    for (const g of brindes) {
+      const un  = parseInt(g.quantity || 0)
+      const vol = parseFloat(g.volume_ml || 0)
+      const p   = g.product_id ? porId[g.product_id] : null
+      if (!p) {
+        brindesSoltos.push({
+          product_name: g.product_name, volume_ml: vol, quantity: un,
+          order_id: g.order_id, code: g.code, created_at: g.created_at,
+        })
+        continue
+      }
+      const row = pegaLinha(p)
+      row.gift_units      += un
+      row.gift_registered += un
+      row.orders.add(g.order_id)
+      if (!row.last_purchase || new Date(g.created_at) > new Date(row.last_purchase)) row.last_purchase = g.created_at
+      if (!row.first_purchase || new Date(g.created_at) < new Date(row.first_purchase)) row.first_purchase = g.created_at
+      row.lines.push({
+        order_id: g.order_id, code: g.code, created_at: g.created_at,
+        volume_ml: vol, quantity: un, unit_price: 0, line_total: 0,
+        is_legacy: !!g.is_legacy, is_gift: true, gift_source: 'registrado',
+      })
+    }
+
+    // Ordena pelo que ele mais "pegou" — comprado + brinde —, que é a pergunta
+    // ("do maior consumo para o menor"). Empate desce para dinheiro.
+    const data = [...linhas.values()]
+      .map(r => ({
+        ...r,
+        orders_count: r.orders.size,
+        orders:       undefined,
+        revenue:      money(r.revenue),
+        ml:           money(r.ml),
+        gift_source:  r.gift_registered > 0 && r.gift_historic > 0 ? 'ambos'
+                    : r.gift_registered > 0 ? 'registrado'
+                    : r.gift_historic > 0 ? 'historico' : null,
+        lines:        r.lines.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)),
+      }))
+      .sort((a, b) =>
+        (b.units + b.gift_units) - (a.units + a.gift_units) ||
+        b.revenue - a.revenue ||
+        String(a.project_name || '').localeCompare(String(b.project_name || ''), 'pt-BR'))
+      .map((r, i) => ({ ...r, rank: i + 1 }))
+
+    // Marcas de inspiração mais compradas — o atalho do "sei o gosto dele".
+    const marcas = new Map()
+    for (const r of data) {
+      const marca = (r.inspiration_brand || '').trim() || '—'
+      const m = marcas.get(marca) || { brand: marca, units: 0, gift_units: 0, revenue: 0, perfumes: 0 }
+      m.units      += r.units
+      m.gift_units += r.gift_units
+      m.revenue    += r.revenue
+      m.perfumes   += 1
+      marcas.set(marca, m)
+    }
+    const brands = [...marcas.values()]
+      .sort((a, b) => (b.units + b.gift_units) - (a.units + a.gift_units) || b.revenue - a.revenue)
+      .map(m => ({ ...m, revenue: money(m.revenue) }))
+
+    // Comparador explícito: `created_at` vem como Date, e `.sort()` sem função
+    // ordena pela representação em texto ("Fri Nov 20 2025" antes de "Sat Feb 21
+    // 2026" por causa do F), o que invertia primeira e última compra.
+    const datas = pedidos.map(p => p.created_at).filter(Boolean)
+      .sort((a, b) => new Date(a) - new Date(b))
+    const receita = data.reduce((s, r) => s + r.revenue, 0)
+
+    res.json({
+      customer: {
+        id: cliente.id, name: cliente.name, phone: cliente.phone,
+        email: cliente.email, city: cliente.city, state: cliente.state,
+        active: cliente.active,
+      },
+      data,
+      volumes: VOLUME_COLUMNS,
+      brands,
+      unmatched_gifts: brindesSoltos,
+      totals: {
+        perfumes:    data.length,
+        units:       data.reduce((s, r) => s + r.units, 0),
+        gift_units:  data.reduce((s, r) => s + r.gift_units, 0),
+        ml:          money(data.reduce((s, r) => s + r.ml, 0)),
+        revenue:     money(receita),
+        orders:      pedidos.length,
+        first_order: datas[0] || null,
+        last_order:  datas[datas.length - 1] || null,
+        avg_ticket:  pedidos.length > 0 ? money(receita / pedidos.length) : null,
+        include_legacy: incluirLegado,
+      },
+    })
+  } catch (e) {
+    console.error('Error building customer history report:', e)
+    res.status(500).json({ error: e.message })
+  }
+}
+
 exports.SOLD_STATUSES = SOLD_STATUSES
