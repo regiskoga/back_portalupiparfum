@@ -251,16 +251,37 @@ exports.productionQueue = async (req, res) => {
       links.map(l => [l.order_item_id, parseInt(l.linked_quantity) || 0])
     )
 
-    // Vínculos detalhados por item (p/ exibir e remover direto na fila)
+    // Vínculos detalhados por item (p/ exibir e remover direto na fila).
+    // `product_ref`/`product_name` vêm junto porque a etiqueta do envase resolve
+    // nome e inspiração pelo projeto, e o envase só guarda o SKU.
     const detailLinks = itemIds.length > 0
       ? await db('order_item_bottlings as oib')
           .join('bottlings as b', 'b.id', 'oib.bottling_id')
           .whereIn('oib.order_item_id', itemIds)
           .select('oib.id', 'oib.order_item_id', 'oib.bottling_id', 'oib.quantity',
-                  'b.bottling_code', 'b.volume_ml', 'b.quantity_available')
+                  'b.bottling_code', 'b.volume_ml', 'b.quantity_available',
+                  'b.product_ref', 'b.product_name')
       : []
+
+    // Lote(s) de origem de cada envase vinculado — a coluna "Lote" da etiqueta sai
+    // daqui (`reduced_lot_number`, exibido como "Lote 001"). Consulta separada de
+    // propósito: juntar `bottling_batches` no SELECT acima multiplicaria a linha do
+    // vínculo pelo número de lotes do envase.
+    const bottlingIds = [...new Set(detailLinks.map(l => l.bottling_id))]
+    const batchRows = bottlingIds.length > 0
+      ? await db('bottling_batches as bb')
+          .join('batches as ba', 'ba.id', 'bb.batch_id')
+          .whereIn('bb.bottling_id', bottlingIds)
+          .select('bb.bottling_id', 'ba.id as batch_id', 'ba.batch_code', 'ba.reduced_lot_number')
+      : []
+    const batchesByBottling = {}
+    for (const b of batchRows) { (batchesByBottling[b.bottling_id] ||= []).push(b) }
+
     const linksListByItem = {}
-    for (const l of detailLinks) { (linksListByItem[l.order_item_id] ||= []).push(l) }
+    for (const l of detailLinks) {
+      l.batches = batchesByBottling[l.bottling_id] || []
+      ;(linksListByItem[l.order_item_id] ||= []).push(l)
+    }
 
     // Envases candidatos por produto (normal, ativo, com saldo) p/ vincular na fila
     const prodIds = [...new Set(items.map(i => i.product_id).filter(Boolean))]
