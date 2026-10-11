@@ -484,9 +484,14 @@ exports.topCustomers = async (req, res) => {
 // distinguir "esgotei" de "nunca produzi", que são coisas diferentes.
 exports.stockOverview = async (req, res) => {
   try {
-    const [porProduto, { ready, gifts }] = await Promise.all([
+    const [porProduto, { ready, gifts }, essenceFor] = await Promise.all([
       buildBatchIndex({ includeEmpty: true }),
       readyUnitsBySku(),
+      // Mesmo índice da aba "Mais vendidos" (pedido do cliente, 10/10/2026):
+      // consultando o estoque ele já quer saber se há essência para repor.
+      // O índice é construído UMA vez; `essenceFor` depois é lookup em memória,
+      // então o custo não cresce com os ~480 projetos.
+      buildEssenceIndex(),
     ])
 
     const produtos = await db('products')
@@ -500,6 +505,7 @@ exports.stockOverview = async (req, res) => {
       const gift_units  = p.sku ? (gifts[p.sku] || 0) : 0
 
       const stock_ml = money(l ? l.ml : 0)
+      const ess      = essenceFor(p)
       data.push({
         product_id:        p.id,
         sku:               p.sku,
@@ -520,6 +526,13 @@ exports.stockOverview = async (req, res) => {
         // rótulos diferentes e o filtro do cliente usa este campo.
         sem_lote:           !l,
         lots:               l ? l.lots : [],
+        // `essence_source` ('vinculo' | 'lote' | 'inspiracao') viaja junto para a
+        // tela marcar o que é palpite — mesma convenção de `topProducts`.
+        // Espalha primeiro e sobrescreve depois: os dois campos de ml precisam
+        // passar por `money()`, senão a tela mostra 12662.799999999967.
+        ...ess,
+        essence_ml:       ess.essence_ml       == null ? null : money(ess.essence_ml),
+        essence_ml_batch: ess.essence_ml_batch == null ? null : money(ess.essence_ml_batch),
       })
     }
 
