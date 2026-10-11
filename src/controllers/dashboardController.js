@@ -635,15 +635,38 @@ async function getNotifications (req, res) {
     const SAMPLE = 8
     const groups = []
 
-    // ① Frascos com estoque baixo (não existia alerta nenhum para frasco)
-    const bottles = await db('supplies')
+    // ① Frascos com estoque baixo — somado POR TIPO, não por linha de compra.
+    //
+    // Cada COMPRA de frasco é uma linha em `supplies`, então o teste linha a
+    // linha avisava "Frasco 30ml zerado" enquanto havia 168 em estoque somando
+    // as três compras (pedido do cliente, vídeo de 10/10/2026: "esse estoque
+    // baixo tinha que estar somando todos os frascos de 30 pra dar esse
+    // alerta, e não por lançamento de insumo"). Para envasar o que importa é o
+    // saldo do TIPO, não de qual nota ele veio.
+    //
+    // `bottle_type` é a chave: em produção são 5 valores limpos (Decant 5ml,
+    // Frasco 15/30/50/100ml) e toda linha de frasco tem o seu. Linha sem
+    // `bottle_type` agrupa pelo próprio nome, para não sumir do alerta em
+    // silêncio.
+    const bottleRows = await db('supplies')
       .where('type', 'Bottle')
-      .where('quantity_available', '<', bottleWarn)
-      .orderBy('quantity_available', 'asc')
-      .select('id', 'name', 'quantity_available', 'unit')
+      .select('id', 'name', 'bottle_type', 'quantity_available', 'unit')
+
+    const porTipoFrasco = new Map()
+    for (const b of bottleRows) {
+      const chave = String(b.bottle_type || '').trim() || b.name
+      const g = porTipoFrasco.get(chave) || { label: chave, qtd: 0, unit: b.unit, compras: 0 }
+      g.qtd += parseFloat(b.quantity_available || 0)
+      g.compras++
+      porTipoFrasco.set(chave, g)
+    }
+
+    const bottles = [...porTipoFrasco.values()]
+      .filter(g => g.qtd < bottleWarn)
+      .sort((a, b) => a.qtd - b.qtd)
 
     if (bottles.length > 0) {
-      const crit = bottles.filter(b => parseFloat(b.quantity_available) < bottleCrit)
+      const crit = bottles.filter(b => b.qtd < bottleCrit)
       groups.push({
         key: 'bottle_low_stock',
         severity: crit.length > 0 ? 'critical' : 'warning',
@@ -655,9 +678,11 @@ async function getNotifications (req, res) {
           : `${bottles.length} abaixo de ${bottleWarn} un.`,
         route: 'insumos',
         items: bottles.slice(0, SAMPLE).map(b => ({
-          label: b.name,
-          detail: `${parseFloat(b.quantity_available)} ${b.unit}`,
-          severity: parseFloat(b.quantity_available) < bottleCrit ? 'critical' : 'warning',
+          label: b.label,
+          // "· N compras" deixa explícito que o número é somado, senão ele
+          // procura a linha com esse saldo no cadastro e não acha.
+          detail: `${b.qtd} ${b.unit}` + (b.compras > 1 ? ` · ${b.compras} compras` : ''),
+          severity: b.qtd < bottleCrit ? 'critical' : 'warning',
         })),
       })
     }
