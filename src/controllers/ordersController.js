@@ -887,6 +887,100 @@ exports.updateStatus = async (req, res) => {
 }
 
 /**
+ * GET /api/orders/:id/history — linha do tempo das fases do pedido.
+ *
+ * Pedido do cliente (vídeo de 10/10/2026): "a data que vem aqui é a data que eu
+ * lancei o pedido... só que em nenhum momento eu tenho a data que foi confirmado,
+ * nem a data que foi pra produção, nem a data pronto... um historicozinho de tudo
+ * que aconteceu nesse pedido, inclusive quando ele voltar a etapas".
+ *
+ * NÃO precisou de tabela nova: todo `updateStatus` já gravava em `activity_logs`
+ * desde 29/08 (781 trocas em 184 pedidos, medido em 11/10). O custo disso é que o
+ * status alvo mora DENTRO da descrição em português, então aqui tem parse de
+ * string — o formato é gravado por este mesmo controller, logo é estável, mas se
+ * alguém mudar o texto do log tem que mudar o regex junto.
+ *
+ * O status ANTERIOR não é gravado: "voltou etapa" é deduzido comparando a posição
+ * na escada abaixo com a do evento anterior da própria linha do tempo.
+ */
+const ESCADA_STATUS = ['Pending', 'Confirmed', 'In Production', 'Ready', 'Shipped', 'Delivered']
+const RX_STATUS_LOG = /Status do pedido alterado para:\s*(.+?)\s*$/
+
+exports.history = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id)
+    const order = await db('orders').where({ id })
+      .select('id', 'code', 'status', 'created_at').first()
+    if (!order) return res.status(404).json({ error: 'Pedido não encontrado' })
+
+    const logs = await db('activity_logs')
+      .where({ entity_type: 'order', entity_id: id })
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc')          // desempate: trocas no mesmo segundo acontecem
+      .select('id', 'activity_type', 'description', 'operator', 'created_at')
+
+    // A criação não vem do log: `orders.created_at` existe em TODO pedido,
+    // inclusive nos 1.014 importados, enquanto `order_created` só existe para os
+    // criados depois que o logger entrou.
+    const timeline = [{
+      status: 'Pending',
+      label: 'Pedido lançado',
+      at: order.created_at,
+      voltou: false,
+      origem: 'order',
+    }]
+
+    for (const l of logs) {
+      const m = RX_STATUS_LOG.exec(l.description || '')
+      if (!m) continue
+      const status = m[1]
+      const anterior = timeline[timeline.length - 1].status
+      // Regravar o mesmo status não é evento: a tela mostraria duas linhas
+      // idênticas. Acontece de verdade logo após a criação, porque o pedido
+      // nasce Pending e um "salvar" sem mudar fase loga Pending de novo.
+      if (status === anterior) continue
+      const iNovo = ESCADA_STATUS.indexOf(status)
+      const iAnt  = ESCADA_STATUS.indexOf(anterior)
+      timeline.push({
+        status,
+        label: 'Status alterado',
+        at: l.created_at,
+        // Só é "voltou" dentro da escada: ir para Cancelled/Lost/Abandoned
+        // (fora dela, índice -1) é saída, não retrocesso.
+        voltou: iNovo >= 0 && iAnt >= 0 && iNovo < iAnt,
+        operator: l.operator,
+        origem: 'log',
+      })
+    }
+
+    // Quando o relógio dos 4 dias úteis começou a contar: a ÚLTIMA entrada em
+    // Confirmed. Ele reconfirma depois de voltar etapas para ajustar o pedido, e
+    // disse que o prazo deve valer a partir daí, não da primeira confirmação.
+    const confirmacoes = timeline.filter(t => t.status === 'Confirmed')
+    const ultimaConfirmacao = confirmacoes.length > 0
+      ? confirmacoes[confirmacoes.length - 1].at
+      : null
+
+    res.json({
+      order_id: order.id,
+      code: order.code,
+      status_atual: order.status,
+      timeline,
+      // Os dois servem para a tela dizer "reconfirmado 2x" sem recontar.
+      confirmacoes: confirmacoes.length,
+      confirmado_em: ultimaConfirmacao,
+      voltas: timeline.filter(t => t.voltou).length,
+      // Antes de 29/08/2026 não havia log de status: pedido mais antigo que isso
+      // mostra só o lançamento. A tela avisa em vez de fingir que nada aconteceu.
+      sem_trilha: timeline.length === 1,
+    })
+  } catch (error) {
+    console.error('Error building order history:', error)
+    res.status(500).json({ error: 'Failed to build order history' })
+  }
+}
+
+/**
  * Busca ordens automáticas de um pedido
  */
 exports.getAutomaticOrders = async (req, res) => {

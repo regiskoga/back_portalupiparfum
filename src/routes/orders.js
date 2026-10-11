@@ -99,6 +99,12 @@ router.patch(
 router.get('/:id/automatic-orders', ordersController.getAutomaticOrders)
 
 /**
+ * GET /api/orders/:id/history
+ * Linha do tempo das fases do pedido, reconstruida de `activity_logs`.
+ */
+router.get('/:id/history', [param('id').isInt()], validate, ordersController.history)
+
+/**
  * POST /api/orders/apply-kit
  * Aplica kit a um pedido
  */
