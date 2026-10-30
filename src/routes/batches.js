@@ -4,6 +4,11 @@ const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
 const { authenticate } = require('../middleware/auth')
 
+// Fase 2 (30/10/2026): consolida auth no router inteiro — antes so os endpoints
+// de escrita exigiam token e os GET (list/stats/stock-summary/...) ficavam
+// abertos (G4). O authenticate inline das escritas vira redundante (inofensivo).
+router.use(authenticate)
+
 const BATCH_STATUSES = ['Em maceração', 'Pronto para envase', 'Finalizado']
 
 const batchRules = [

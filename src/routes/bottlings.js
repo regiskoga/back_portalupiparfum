@@ -4,6 +4,11 @@ const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
 const { authenticate } = require('../middleware/auth')
 
+// Fase 2 (30/10/2026): consolida auth no router inteiro — antes so os endpoints
+// de escrita exigiam token e os GET ficavam abertos (G4). O authenticate inline
+// das escritas vira redundante (inofensivo).
+router.use(authenticate)
+
 const bottlingRules = [
   body('bottling_code').optional().trim(),
   body('bottling_date').isISO8601().withMessage('Valid bottling date is required'),
