@@ -2,6 +2,14 @@ const router = require('express').Router()
 const ctrl   = require('../controllers/clientesController')
 const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
+const { authenticate } = require('../middleware/auth')
+
+// Fase 2 do fechamento do gap de autenticação (30/10/2026): esta rota expõe
+// CPF e endereço dos clientes — vazamento de LGPD enquanto ficou aberta. Agora
+// exige sessão válida. Todas as telas que consomem /api/customers (clientes,
+// vendas, dashboard, relatorios) já mandam o token; sessão expirada é tratada
+// pelo interceptor global de 401 do front (services/http.js).
+router.use(authenticate)
 
 // IMPORTANTE: chains do express-validator são MUTÁVEIS. Antes o PATCH fazia
 // `customerRules.map(r => r.optional())`, o que mutava as MESMAS chains do POST
