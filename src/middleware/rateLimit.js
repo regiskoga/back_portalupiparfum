@@ -13,12 +13,12 @@
 // o atacante também teria que recomeçar). Se um dia escalar para N instâncias
 // ou quiser persistência, trocar por um store compartilhado (Redis).
 //
-// IP do cliente: atrás do proxy do Coolify, req.ip é o IP do proxy. Pegamos o
-// primeiro IP do X-Forwarded-For quando houver, caindo para req.ip.
+// IP do cliente: com `app.set('trust proxy', 1)` no server.js, req.ip já é o IP
+// REAL do cliente (o Express extrai do X-Forwarded-For confiando só no proxy do
+// Coolify). NÃO ler o X-Forwarded-For na mão aqui: pegar o primeiro item da
+// lista é spoofável (o atacante manda um XFF falso e burla o limite).
 
 function clientIp (req) {
-  const xff = req.headers['x-forwarded-for']
-  if (xff) return String(xff).split(',')[0].trim()
   return req.ip || req.connection?.remoteAddress || 'desconhecido'
 }
 

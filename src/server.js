@@ -40,6 +40,13 @@ const monthlyExpensesRoutes = require('./routes/monthlyExpenses')
 const app  = express()
 const PORT = process.env.PORT || 3001
 
+// Atrás do proxy do Coolify (Traefik, 1 hop): faz req.ip ser o IP REAL do
+// cliente (o Express pega o IP que o proxy confiável anexou, ignorando qualquer
+// X-Forwarded-For que o cliente tente injetar). Essencial para o rate-limit de
+// login não ser burlável por spoof de header. Se um dia entrar o Cloudflare na
+// frente (mais 1 hop), subir este número para 2.
+app.set('trust proxy', 1)
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
 // CORS explícito — funciona mesmo atrás de reverse proxy (Traefik/Nginx)
 const ALLOWED_ORIGINS = [
