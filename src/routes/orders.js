@@ -9,6 +9,14 @@ const ordersController = require('../controllers/ordersController')
 const orderGiftsRouter = require('./orderGifts')
 const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')
+const { authenticate } = require('../middleware/auth')
+
+// Fase 2 do fechamento do gap de autenticação (30/10/2026): pedidos expõem
+// nome do cliente + valores (dado pessoal/LGPD). Exige sessão válida em toda a
+// superfície, inclusive o sub-router de brindes montado abaixo. Telas que usam
+// /api/orders (vendas, pedidos-antigos, producao, envases, clientes) já mandam
+// o token; sessão expirada cai no interceptor global de 401 do front.
+router.use(authenticate)
 
 // Sub-router: brindes do pedido (montado abaixo para garantir prioridade
 // sobre rotas com pattern :id que viriam depois).
