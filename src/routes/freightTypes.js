@@ -1,4 +1,6 @@
 const router = require('express').Router()
+const { authenticate } = require('../middleware/auth')
+router.use(authenticate) // Fase 2 (30/10/2026): exige sessao valida - fecha API aberta (G4)
 const ctrl = require('../controllers/freightTypesController')
 const { body, param } = require('express-validator')
 const { validate } = require('../middleware/validate')

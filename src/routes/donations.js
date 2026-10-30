@@ -5,6 +5,8 @@
 
 const express = require('express')
 const router = express.Router()
+const { authenticate } = require('../middleware/auth')
+router.use(authenticate) // Fase 2 (30/10/2026): exige sessao valida - fecha API aberta (G4)
 const donationsController = require('../controllers/donationsController')
 const { body } = require('express-validator')
 const { validate } = require('../middleware/validate')
