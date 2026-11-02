@@ -14,4 +14,9 @@ router.post('/order', ctrl.createOrder)
 router.get('/stock',          requireSyncSecret, ctrl.stock)
 router.post('/validate-cart', requireSyncSecret, ctrl.validateCart)
 
+// A volta do laco: pedido PAGO na loja entra aqui como pedido `Confirmed`.
+// Mesmo segredo, mesma logica de falha fechada. Idempotente pelo id do pedido
+// da loja (`orders.code = WOO-<id>`), porque gateway de pagamento repete.
+router.post('/store-order',   requireSyncSecret, ctrl.storeOrder)
+
 module.exports = router

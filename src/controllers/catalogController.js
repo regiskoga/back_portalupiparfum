@@ -317,6 +317,15 @@ async function stock (req, res) {
         sob_encomenda:  d ? d.sob_encomenda : null,
         envases_sem_laboratorio: d ? d.envases_sem_laboratorio : 0,
         unidades_de_outros_labs: d ? d.unidades_de_outros_labs : 0,
+        // Quanto do saldo ja tem dono (pedido em aberto sem envase vinculado).
+        // Vai no payload para a reserva ser auditavel no relatorio da loja: sem
+        // isso, pedido antigo parado em `Confirmed` esconde estoque e ninguem
+        // descobre por que o numero caiu.
+        ml_comprometido: d ? d.ml_comprometido : 0,
+        // O bruto acima inclui a parte absorvida por frasco pronto; este e o que
+        // saiu do bolo de ml. Com frasco na prateleira os dois divergem.
+        ml_descontado_do_liquido: d ? d.ml_descontado_do_liquido : 0,
+        itens_comprometidos_sem_volume: d ? d.itens_comprometidos_sem_volume : 0,
       }
     })
 
@@ -403,4 +412,267 @@ async function validateCart (req, res) {
   }
 }
 
-module.exports = { list, brands, createOrder, stock, validateCart }
+// ─── PEDIDO PAGO NA LOJA → PEDIDO CONFIRMADO AQUI ────────────────────────────
+//
+// A outra metade do laço. O `/stock` empurra disponibilidade para a loja; este
+// endpoint recebe de volta a venda que aconteceu lá. Sem ele, o estoque que a
+// loja publica nunca é baixado e a sincronização automática viraria oversell.
+//
+// Chamado pelo PHP da loja QUANDO O PAGAMENTO É CONFIRMADO (InfinitePay), não
+// quando o carrinho é fechado. Pela regra do Rafael, pedido pago entra como
+// `Confirmed`. Protegido pelo mesmo `x-sync-secret`.
+//
+// NÃO RECUSA POR FALTA DE ESTOQUE, de propósito: o dinheiro já entrou. Se o
+// saldo não cobre, o pedido é registrado de todo jeito e a sobra sai em
+// `aviso_estoque` + nas notas — é o "pagar e aguardar a maceração". Recusar
+// aqui perderia a venda E o registro, com o cliente já cobrado.
+
+// Chave de lock para a idempotência (ver abaixo). Número arbitrário e fixo,
+// só precisa não colidir com o do gerador de SKU (528431).
+const LOCK_PEDIDO_LOJA = 528432
+
+// A tela de Vendas monta o campo de pagamento como um <select> de lista FIXA
+// (`PAYMENT_METHODS` em vendas.js). Gravar aqui um valor fora dela — p.ex.
+// "InfinitePay" — deixaria o select sem opção marcada, e o próximo salvamento
+// na tela regravaria em silêncio a 1ª opção ("Pix"). Então o que vai para a
+// coluna é sempre um valor que a tela conhece, e o texto cru do gateway fica
+// nas notas, onde não corrompe nada.
+function metodoDePagamento (cru) {
+  const t = String(cru || '').toLowerCase()
+  if (t.includes('pix')) return 'Pix'
+  if (t.includes('debit') || t.includes('débito')) return 'Cartão de Débito'
+  if (t.includes('credit') || t.includes('crédito') || t.includes('card')) return 'Cartão de Crédito'
+  if (t.includes('transfer')) return 'Transferência'
+  if (t.includes('dinheiro') || t.includes('cash')) return 'Dinheiro'
+  return 'Outro'
+}
+
+function soDigitos (v) { return String(v || '').replace(/\D/g, '') }
+
+/**
+ * POST /api/public/catalog/store-order
+ *
+ * Body:
+ * {
+ *   "loja_order_id": 1234,              // obrigatório — é a chave da idempotência
+ *   "pago_em":       "2026-11-02",      // opcional
+ *   "pagamento":     "pix",             // opcional, texto cru do gateway
+ *   "total_pago":    350.00,            // opcional
+ *   "frete":         25.00,
+ *   "desconto":      0,
+ *   "cliente": { "nome", "telefone", "email", "cpf", "cep", "rua", "numero",
+ *                "complemento", "bairro", "cidade", "estado" },
+ *   "itens": [ { "sku", "volume_ml", "quantidade", "preco_unitario" } ],
+ *   "observacoes": "..."
+ * }
+ */
+async function storeOrder (req, res) {
+  try {
+    const b = req.body || {}
+    const lojaId = String(b.loja_order_id || '').trim()
+    if (!lojaId) return res.status(422).json({ error: 'loja_order_id e obrigatorio' })
+
+    const cliente = b.cliente || {}
+    const nome = String(cliente.nome || '').trim()
+    const telefone = String(cliente.telefone || '').trim()
+    if (!nome) return res.status(422).json({ error: 'cliente.nome e obrigatorio' })
+
+    const itensBody = Array.isArray(b.itens) ? b.itens : []
+    if (!itensBody.length) return res.status(422).json({ error: 'itens vazio' })
+
+    const code = `WOO-${lojaId}`
+
+    // Resolve os SKUs ANTES da transação. SKU desconhecido ou ambíguo é
+    // RECUSADO, não adivinhado — mesmo contrato do /stock: `products.sku` não
+    // tem índice único, e gravar o item no projeto errado criaria um pedido
+    // para o perfume errado, com o cliente já cobrado. Recusar devolve 409 e a
+    // loja repete depois; é recuperável, pedido errado não é.
+    const skus = [...new Set(itensBody.map(i => String(i.sku || '').trim()).filter(Boolean))]
+    if (!skus.length) return res.status(422).json({ error: 'nenhum item com sku' })
+
+    const produtos = await db('products')
+      .whereIn('sku', skus)
+      .select('id', 'sku', 'project_name', 'active', 'catalog_status')
+
+    const porSku = {}
+    for (const p of produtos) {
+      const k = String(p.sku).trim()
+      ;(porSku[k] = porSku[k] || []).push(p)
+    }
+
+    const desconhecidos = skus.filter(s => !porSku[s])
+    const ambiguos = skus.filter(s => porSku[s] && porSku[s].length > 1)
+    if (desconhecidos.length || ambiguos.length) {
+      return res.status(409).json({
+        error: 'Nao foi possivel identificar os produtos do pedido',
+        skus_desconhecidos: desconhecidos,
+        skus_ambiguos: ambiguos,
+      })
+    }
+
+    // Projeto inativo/fora do catálogo NÃO barra: a loja pode ter vendido antes
+    // de a sincronização esconder a ficha. A venda existe e tem de ser
+    // registrada; o desvio sai no aviso.
+    const inativos = skus.filter(s => !porSku[s][0].active || !porSku[s][0].catalog_status)
+
+    const resultado = await db.transaction(async trx => {
+      // IDEMPOTÊNCIA. `orders.code` é `text` SEM índice único (migration
+      // original: `table.text('code').defaultTo('')`), então não há como
+      // delegar isso ao banco com ON CONFLICT. Dois webhooks simultâneos — e
+      // gateway que repete é a regra, não a exceção — passariam os dois pelo
+      // "já existe?" e criariam dois pedidos para a mesma venda.
+      // O advisory lock fecha a janela: é por transação, serializa as chamadas
+      // da MESMA venda e não encosta em venda diferente. Mesmo recurso que o
+      // gerador de SKU usa (pg_advisory_xact_lock).
+      await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [LOCK_PEDIDO_LOJA, code])
+
+      const jaExiste = await trx('orders').where('code', code).first()
+      if (jaExiste) {
+        return { ja_existia: true, order_id: jaExiste.id, order_code: jaExiste.code, status: jaExiste.status }
+      }
+
+      // Cliente: casa pelo telefone normalizado, como o createOrder do catálogo.
+      // Sem telefone não dá para casar — cria novo em vez de colar a venda num
+      // homônimo qualquer.
+      const fone = soDigitos(telefone)
+      let registro = null
+      if (fone) {
+        registro = await trx('customers')
+          .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [fone])
+          .first()
+      }
+
+      const endereco = {
+        email:         String(cliente.email || '').trim() || null,
+        tax_id:        String(cliente.cpf || '').trim() || null,
+        zip_code:      String(cliente.cep || '').trim() || null,
+        street:        String(cliente.rua || '').trim() || null,
+        street_number: String(cliente.numero || '').trim() || null,
+        complement:    String(cliente.complemento || '').trim() || null,
+        neighborhood:  String(cliente.bairro || '').trim() || null,
+        city:          String(cliente.cidade || '').trim() || null,
+        state:         String(cliente.estado || '').trim() || null,
+      }
+
+      if (!registro) {
+        ;[registro] = await trx('customers')
+          .insert({ name: nome, phone: telefone || null, ...endereco })
+          .returning('*')
+      } else {
+        // Cliente que já existe NÃO é sobrescrito: a loja manda o endereço de
+        // UMA entrega, e o cadastro daqui pode ter dado melhor, corrigido à
+        // mão. Só preenche campo que está vazio.
+        const preencher = {}
+        for (const [k, v] of Object.entries(endereco)) {
+          if (v && !String(registro[k] || '').trim()) preencher[k] = v
+        }
+        if (Object.keys(preencher).length) {
+          await trx('customers').where('id', registro.id).update(preencher)
+        }
+      }
+
+      const cru = String(b.pagamento || '').trim()
+      const notas = [
+        `Pedido pago no site (loja #${lojaId}).`,
+        cru ? `Forma de pagamento informada pela loja: ${cru}.` : null,
+        inativos.length ? `ATENCAO: vendido com projeto fora do catalogo: ${inativos.join(', ')}.` : null,
+        String(b.observacoes || '').trim() || null,
+      ].filter(Boolean).join(' ')
+
+      const [order] = await trx('orders')
+        .insert({
+          customer_id:  registro.id,
+          code,
+          // Pago = `Confirmed`, regra do cliente. Confirmar NÃO debita estoque
+          // (quem debita é o vínculo de envase, na Fila de Produção) — é por
+          // isso que `catalogAvailability` desconta o pendente dos pedidos em
+          // aberto. As duas coisas são o mesmo laço.
+          status:       'Confirmed',
+          channel:      'Site',
+          from_catalog: true,
+          discount:     Math.max(0, parseFloat(b.desconto) || 0),
+          shipping:     Math.max(0, parseFloat(b.frete) || 0),
+          payment_method: metodoDePagamento(cru),
+          amount_paid:  b.total_pago === undefined || b.total_pago === null
+            ? null
+            : Math.max(0, parseFloat(b.total_pago) || 0),
+          payment_date: String(b.pago_em || '').slice(0, 10) || null,
+          notes:        notas,
+        })
+        .returning('*')
+
+      // PREÇO VEM DA REQUISIÇÃO, e isto é o certo: quem cobrou foi a loja, e o
+      // valor cobrado é o que ela diz. Buscar em `price_lists` aqui faria o
+      // pedido divergir da cobrança sempre que a tabela mudasse entre a venda e
+      // o webhook, ou sempre que houver promoção no site. É seguro porque o
+      // endpoint está atrás do segredo de sincronização, servidor-a-servidor.
+      // Não "corrija" isto resolvendo o preço no servidor.
+      const itens = itensBody
+        .map(i => {
+          const p = porSku[String(i.sku || '').trim()]
+          if (!p) return null
+          const qtd = parseFloat(i.quantidade) || 0
+          if (qtd <= 0) return null
+          return {
+            order_id:      order.id,
+            product_id:    p[0].id,
+            product_name:  p[0].project_name,
+            product_ref:   p[0].sku || '',
+            volume_ml:     parseFloat(i.volume_ml) || 0,
+            quantity:      qtd,
+            unit_price:    Math.max(0, parseFloat(i.preco_unitario) || 0),
+            item_discount: 0,
+          }
+        })
+        .filter(Boolean)
+
+      if (!itens.length) throw new Error('Nenhum item valido apos a validacao')
+      await trx('order_items').insert(itens)
+
+      return {
+        ja_existia: false,
+        order_id: order.id,
+        order_code: order.code,
+        status: order.status,
+        customer_id: registro.id,
+        itens: itens.length,
+      }
+    })
+
+    // Checagem de cobertura DEPOIS de gravar, e só informativa. Roda fora da
+    // transação para não alongar o lock, e o pedido já criado conta como
+    // comprometido — então o número devolvido é o saldo que SOBROU.
+    let avisoEstoque = null
+    if (!resultado.ja_existia) {
+      try {
+        const ids = [...new Set(skus.map(s => porSku[s][0].id))]
+        const disp = await buildAvailability(ids)
+        const faltas = []
+        for (const id of ids) {
+          const d = disp[id]
+          if (d && d.liquido_ml <= 0 && (!d.prontos || !d.prontos.length)) {
+            faltas.push({
+              sku: porSku[skus.find(s => porSku[s][0].id === id)][0].sku,
+              previsao: d.sob_encomenda ? d.sob_encomenda.previsao : null,
+            })
+          }
+        }
+        if (faltas.length) avisoEstoque = { sem_saldo_livre: faltas }
+      } catch (e) {
+        // Falha aqui NÃO invalida o pedido: ele já está gravado e pago.
+        console.error('[catalog] storeOrder aviso de estoque falhou:', e.message)
+      }
+    }
+
+    res.status(resultado.ja_existia ? 200 : 201).json({
+      ...resultado,
+      projetos_fora_do_catalogo: inativos,
+      aviso_estoque: avisoEstoque,
+    })
+  } catch (error) {
+    console.error('[catalog] storeOrder error:', error)
+    res.status(500).json({ error: 'Erro ao registrar o pedido da loja' })
+  }
+}
+
+module.exports = { list, brands, createOrder, stock, validateCart, storeOrder }

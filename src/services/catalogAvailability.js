@@ -14,6 +14,10 @@
  * 3. Só lote 'Pronto para envase' conta como disponível AGORA. 'Em maceração'
  *    vira a opção "pagar e aguardar", com data real em vez dos 20 dias chapados.
  *    'Finalizado' é automático quando o ml zera, então não tem saldo.
+ * 4. O que já tem dono não é disponível. Confirmar pedido NÃO debita estoque
+ *    aqui (quem debita é o vínculo de envase), então o saldo publicado desconta
+ *    o pendente dos pedidos em aberto — ver `comprometidoPorProjeto` abaixo.
+ *    Sem isso, com a loja gravando estoque sozinha, o oversell é garantido.
  *
  * ATENÇÃO: laboratório é DERIVADO, não armazenado. É o fornecedor da 1ª essência
  * do lote (mesma definição de `batchesController`, que usa isso no `batch_code`).
@@ -68,6 +72,77 @@ async function labPorLote (batchIds) {
   return mapa
 }
 
+// ─── ML COMPROMETIDO POR PEDIDO EM ABERTO ────────────────────────────────────
+//
+// POR QUE ISSO EXISTE: confirmar pedido NÃO debita estoque neste sistema. Quem
+// debita é `linkBottling` (o gesto na tela Fila de Produção). Então um pedido
+// pago do site entra como `Confirmed` e o `batches.remaining_ml` não se move —
+// a vitrine continuaria anunciando líquido JÁ VENDIDO até alguém envasar. Com
+// a loja gravando estoque automaticamente, isso é oversell garantido, não
+// eventual. A disponibilidade publicada tem de descontar o que já tem dono.
+//
+// Qual parcela conta: `quantity - Σ(order_item_bottlings.quantity)` — a mesma
+// conta do `pending_quantity` da Fila de Produção. O que já está VINCULADO não
+// entra: aquele envase já saiu de `bottlings.quantity_available`, e descontar
+// de novo tiraria o estoque duas vezes.
+//
+// Quais status contam (ABERTOS): o pedido tem dono e ainda não foi atendido.
+//   - `Pending` fica FORA: é carrinho/orçamento não pago (pela regra do Rafael,
+//     pedido pago entra como `Confirmed`). Card não pago e esquecido esconderia
+//     estoque para sempre.
+//   - `Shipped`/`Delivered`/`Finalizado` ficam FORA: se saiu sem vínculo, é
+//     lacuna histórica de dado — reservar isso eternamente apagaria estoque real.
+//   - `Cancelled`/`Lost`/`Abandoned` ficam FORA: não têm dono.
+// Não é o `SOLD_STATUSES` dos relatórios: aquele inclui `Delivered`, que aqui
+// não pode entrar.
+const STATUS_ABERTOS = ['Confirmed', 'In Production', 'Ready']
+
+/**
+ * @returns {Promise<Object>} product_id -> { porVolume: {v: qtd}, ml: number, semVolume: number }
+ */
+async function comprometidoPorProjeto (ids) {
+  if (!ids.length) return {}
+
+  const itens = await db('order_items as oi')
+    .join('orders as o', 'o.id', 'oi.order_id')
+    .whereIn('oi.product_id', ids)
+    .whereIn('o.status', STATUS_ABERTOS)
+    .select(
+      'oi.id',
+      'oi.product_id',
+      db.raw('CAST(oi.volume_ml AS float) as volume_ml'),
+      db.raw('CAST(oi.quantity AS float) as quantity')
+    )
+
+  const vinculos = itens.length
+    ? await db('order_item_bottlings')
+      .whereIn('order_item_id', itens.map(i => i.id))
+      .groupBy('order_item_id')
+      .select('order_item_id')
+      .sum('quantity as linked_quantity')
+    : []
+
+  const vinculadoDe = {}
+  for (const v of vinculos) vinculadoDe[v.order_item_id] = parseInt(v.linked_quantity) || 0
+
+  const mapa = {}
+  for (const it of itens) {
+    const m = (mapa[it.product_id] = mapa[it.product_id] || { porVolume: {}, ml: 0, semVolume: 0 })
+    const pendente = Math.max(0, num(it.quantity) - (vinculadoDe[it.id] || 0))
+    if (pendente <= 0) continue
+
+    const v = num(it.volume_ml)
+    // Item sem volume é o fluxo "leve" do drawer de Clientes e o do catálogo
+    // antigo (`volume_ml: null`). Não dá para orçar em ml, então não desconta —
+    // mas vai contado no retorno, senão some uma reserva real sem rastro.
+    if (v <= 0) { m.semVolume += pendente; continue }
+
+    m.porVolume[v] = (m.porVolume[v] || 0) + pendente
+    m.ml += pendente * v
+  }
+  return mapa
+}
+
 function vazio () {
   return {
     laboratorio_id: null,
@@ -76,6 +151,9 @@ function vazio () {
     sob_encomenda: null,
     envases_sem_laboratorio: 0,
     unidades_de_outros_labs: 0,
+    ml_comprometido: 0,
+    ml_descontado_do_liquido: 0,
+    itens_comprometidos_sem_volume: 0,
   }
 }
 
@@ -175,12 +253,26 @@ async function buildAvailability (productIds) {
     b.prontos[v] = (b.prontos[v] || 0) + (parseInt(f.quantity_available) || 0)
   }
 
+  const comprometido = await comprometidoPorProjeto(ids)
+
   // Elege o laboratório vencedor por ml-equivalente
   const saida = {}
   for (const pid of ids) {
     const d = porProjeto[pid]
-    if (!d) { saida[pid] = vazio(); continue }
+    const comp = comprometido[pid] || { porVolume: {}, ml: 0, semVolume: 0 }
+    if (!d) { saida[pid] = { ...vazio(), ml_comprometido: comp.ml, itens_comprometidos_sem_volume: comp.semVolume }; continue }
 
+    // Elege pelo ml-equivalente BRUTO, sem olhar a reserva. Tentei descontar a
+    // reserva aqui para o desempate e não serve para nada: `comp.ml` é a mesma
+    // constante para todos os labs do loop, então subtrair não muda o argmax
+    // (argmax(x−c) = argmax(x)). Seria código que parece fazer algo e não faz.
+    //
+    // CONSEQUÊNCIA ASSUMIDA: a reserva é debitada do vencedor DEPOIS de eleito
+    // (logo abaixo). Então projeto cujo lab da frente está todo vendido publica
+    // ZERO, mesmo que um lab perdedor tenha líquido livre. Subestima, nunca
+    // vende o que não tem. Dividir a reserva entre labs exigiria saber de qual
+    // lab cada pedido será atendido, e isso não está registrado em lugar nenhum
+    // — o laboratório é derivado do lote, e o pedido ainda não tem lote.
     let vencedor = null
     let melhor = -1
     for (const k of Object.keys(d.labs)) {
@@ -188,6 +280,31 @@ async function buildAvailability (productIds) {
       const equivalente = b.liquido_ml +
         Object.entries(b.prontos).reduce((a, [v, q]) => a + num(v) * q, 0)
       if (equivalente > melhor) { melhor = equivalente; vencedor = b }
+    }
+
+    // Debita a reserva do vencedor: frasco pronto do mesmo volume primeiro, o
+    // resto do bolo de ml. Mesma ordem de alocação do `validarCarrinho`, que é
+    // também a ordem real de atendimento — o envase já existe e não gasta
+    // líquido. Trabalha em cópia: `d.labs` não é mutado.
+    let descontadoDoLiquido = 0
+    if (vencedor) {
+      const prontos = { ...vencedor.prontos }
+      let faltaMl = 0
+      for (const [v, qtd] of Object.entries(comp.porVolume)) {
+        const doEstoque = Math.min(qtd, prontos[v] || 0)
+        prontos[v] = (prontos[v] || 0) - doEstoque
+        faltaMl += (qtd - doEstoque) * num(v)
+      }
+      // O que REALMENTE saiu do bolo de ml. Difere de `comp.ml` sempre que um
+      // frasco pronto absorveu parte da reserva: ali "reservado 60ml" convive
+      // com o líquido intacto, e relatar só o bruto faz parecer que o líquido
+      // caiu quando não caiu.
+      descontadoDoLiquido = Math.min(faltaMl, vencedor.liquido_ml)
+      vencedor = {
+        lab: vencedor.lab,
+        liquido_ml: Math.max(0, vencedor.liquido_ml - faltaMl),
+        prontos: Object.fromEntries(Object.entries(prontos).filter(([, q]) => q > 0)),
+      }
     }
 
     // Frasco de lab perdedor existe na prateleira e não vai à vitrine. Isso é a
@@ -223,6 +340,12 @@ async function buildAvailability (productIds) {
         : null,
       envases_sem_laboratorio: d.semLab,
       unidades_de_outros_labs: perdedores,
+      // Vão no retorno para a reserva ser AUDITÁVEL. Sem isso, pedido antigo
+      // parado em `Confirmed` sem vínculo some estoque da vitrine e ninguém
+      // descobre por que — o relatório da loja mostra o número e dá o rastro.
+      ml_comprometido: comp.ml,
+      ml_descontado_do_liquido: descontadoDoLiquido,
+      itens_comprometidos_sem_volume: comp.semVolume,
     }
   }
   return saida
@@ -303,4 +426,4 @@ function validarCarrinho (disp, itens) {
   }
 }
 
-module.exports = { buildAvailability, opcoesPorVolume, validarCarrinho }
+module.exports = { buildAvailability, opcoesPorVolume, validarCarrinho, STATUS_ABERTOS }
