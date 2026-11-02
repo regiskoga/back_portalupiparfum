@@ -1,3 +1,4 @@
+const { invalidarCacheDoSegredo, PARAM_KEY: SYNC_SECRET_KEY } = require('../middleware/syncSecret')
 const { db } = require('../models/db')
 
 async function getAll (req, res) {
@@ -29,6 +30,12 @@ async function update (req, res) {
           .update({ value: String(value), updated_at: trx.fn.now() })
       }
     })
+
+    // O middleware de sincronizacao cacheia o segredo por 30s para nao fazer um
+    // SELECT por requisicao. Se foi ele que mudou agora, zera o cache para o
+    // valor novo valer na hora — senao quem acabou de colar o segredo na tela
+    // leva meio minuto de 401 sem entender por que.
+    if (Object.keys(updates).includes(SYNC_SECRET_KEY)) invalidarCacheDoSegredo()
 
     const rows = await db('parameters').select('*').orderBy('key')
     res.json(rows)
