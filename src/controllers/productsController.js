@@ -2,6 +2,54 @@ const { db } = require('../models/db')
 const ActivityLogger = require('../services/activityLogger')
 const fragranceService = require('../services/fragranceService')
 
+// ─── CÓDIGO DO PROJETO (SKU) ──────────────────────────────────────────────────
+// Formato "PFM - 00001" (prefixo + 5 dígitos). A tela de Projetos
+// (`pages/projetos.js`, campo opcional de texto livre) manda `sku: null` quando
+// o usuário deixa em branco, e a importação por planilha — que preenchia o resto
+// — saiu de uso em 02/11/2026. Projeto sem código fica de fora da junção
+// produto↔envase (`bottlings.product_ref = products.sku`), usada na Fila de
+// Produção, no estoque acabado, no vínculo lote↔envase e no catálogo público.
+// Por isso aqui a gente preenche o que vier em branco, sem tirar do usuário a
+// liberdade de informar o código à mão.
+//
+// Política: MAX + 1. Os ~30 buracos da numeração herdada da planilha seguem
+// buracos — isto é "o próximo livre acima do maior", não um contador. A variante
+// fora do padrão ("PFM - 00001,1") casa o prefixo, lê 00001 e não afeta o máximo.
+const SKU_PREFIX   = 'PFM - '
+const SKU_DIGITS   = 5
+const SKU_LOCK_KEY = 528431   // chave do advisory lock que serializa a geração
+
+function formatSku (n) {
+  return `${SKU_PREFIX}${String(n).padStart(SKU_DIGITS, '0')}`
+}
+
+// Gera o próximo código DENTRO da transação recebida. `products.sku` não tem
+// índice único (a migration 20260513_004 só cria índice comum), então dois
+// cadastros simultâneos poderiam ler o mesmo máximo e gerar o mesmo código. O
+// advisory lock de transação serializa a geração sem precisar de migration nem
+// de tabela de contador — e é liberado sozinho no commit/rollback.
+async function generateNextSku (trx) {
+  await trx.raw('SELECT pg_advisory_xact_lock(?)', [SKU_LOCK_KEY])
+  const { rows } = await trx.raw(
+    `SELECT COUNT(*)::int AS casam,
+            MAX(substring(sku from '^PFM *- *([0-9]+)')::int) AS max
+       FROM products
+      WHERE sku ~ '^PFM *- *[0-9]+'`
+  )
+  const casam = rows?.[0]?.casam ?? 0
+  const max   = rows?.[0]?.max
+
+  // Guarda contra o modo de falha SILENCIOSO: se existe sku no padrão mas o MAX
+  // veio nulo, a leitura está errada — e aí o fallback "começa do 1" geraria
+  // `PFM - 00001`, que JÁ EXISTE em produção, pendurando o projeto novo nos
+  // envases de outro. Falhar alto é melhor que colidir em silêncio.
+  if (casam > 0 && (max === null || max === undefined)) {
+    throw new Error('Não foi possível ler o maior código de projeto (products.sku) para gerar o próximo')
+  }
+
+  return formatSku((parseInt(max) || 0) + 1)
+}
+
 // ─── LIST PRODUCTS ────────────────────────────────────────────────────────────
 async function list(req, res) {
   try {
@@ -124,28 +172,38 @@ async function create(req, res) {
       notes = ''
     } = req.body
 
-    const [product] = await db('products').insert({
-      project_name,
-      inspiration_brand,
-      inspiration_name,
-      commercial_name,
-      sku,
-      gender,
-      catalog_status,
-      bottle_photo_url,
-      original_photo_url,
-      main_accords,
-      perfumer,
-      launch_year,
-      day_night_profile,
-      narrative,
-      top_notes,
-      heart_notes,
-      base_notes,
-      notes,
-      active: true
-    }).returning('*')
-    
+    // Gera o código só quando vem vazio: sku informado à mão na tela, ou vindo
+    // da importação, continua sendo respeitado como está. Lock e insert na
+    // MESMA transação para dois cadastros simultâneos não lerem o mesmo máximo.
+    const product = await db.transaction(async trx => {
+      const finalSku = (typeof sku === 'string' && sku.trim())
+        ? sku.trim()
+        : await generateNextSku(trx)
+
+      const [row] = await trx('products').insert({
+        project_name,
+        inspiration_brand,
+        inspiration_name,
+        commercial_name,
+        sku: finalSku,
+        gender,
+        catalog_status,
+        bottle_photo_url,
+        original_photo_url,
+        main_accords,
+        perfumer,
+        launch_year,
+        day_night_profile,
+        narrative,
+        top_notes,
+        heart_notes,
+        base_notes,
+        notes,
+        active: true
+      }).returning('*')
+      return row
+    })
+
     // Log da criação
     await ActivityLogger.logCreate('product', product.id, project_name, product)
 
