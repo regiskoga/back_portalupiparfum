@@ -1,4 +1,5 @@
 const { db } = require('../models/db')
+const { buildAvailability, opcoesPorVolume, validarCarrinho } = require('../services/catalogAvailability')
 
 async function list(req, res) {
   try {
@@ -76,18 +77,11 @@ async function list(req, res) {
       })
     })
 
-    // Disponibilidade: produto tem envase ativo com saldo > 0?
-    const available = await db('bottlings as bt')
-      .join('bottling_batches as bb', 'bb.bottling_id', 'bt.id')
-      .join('batches as b',           'b.id',           'bb.batch_id')
-      .join('formulas as f',          'f.id',           'b.formula_id')
-      .whereIn('f.product_id', ids)
-      .where('bt.quantity_available', '>', 0)
-      .where('bt.active', true)
-      .distinct('f.product_id')
-      .select('f.product_id')
-
-    const availableSet = new Set(available.map(r => r.product_id))
+    // Disponibilidade por projeto x laboratório (ver services/catalogAvailability).
+    // A query anterior ia por bottling_batches -> batches -> formulas.product_id e
+    // divergia do resto do sistema em dois sentidos: deixava de fora todo envase
+    // sem vínculo de lote, e contava envase type='brinde' como vendável.
+    const disponibilidade = await buildAvailability(ids)
 
     const data = produtos.map(p => ({
       id:               p.id,
@@ -108,7 +102,10 @@ async function list(req, res) {
       launch_year:      p.launch_year,
       day_night_profile: p.day_night_profile,
       prices:           priceMap[p.id] || [],
-      disponivel:       availableSet.has(p.id),
+      // `disponivel` continua sendo o booleano "dá para comprar agora" que a
+      // página /catalogo.html já lê (cat-prices / selo de indisponível).
+      disponivel:       temSaldoAgora(disponibilidade[p.id]),
+      disponibilidade:  montaDisponibilidade(disponibilidade[p.id], priceMap[p.id]),
     }))
 
     res.json({ data, total: parseInt(count), page: parseInt(page), limit: parseInt(limit) })
@@ -219,4 +216,191 @@ async function createOrder(req, res) {
   }
 }
 
-module.exports = { list, brands, createOrder }
+// ─── HELPERS DE DISPONIBILIDADE ───────────────────────────────────────────────
+function temSaldoAgora (disp) {
+  if (!disp) return false
+  return disp.liquido_ml > 0 || disp.prontos.length > 0
+}
+
+function montaDisponibilidade (disp, precos) {
+  if (!disp) return null
+  const volumes = (precos || []).map(pr => pr.volume_ml)
+  return {
+    laboratorio_id: disp.laboratorio_id,
+    // Orçamento COMPARTILHADO entre os volumes — quem monta carrinho debita daqui
+    // a cada item, senão vende duas vezes o mesmo líquido.
+    liquido_ml:     disp.liquido_ml,
+    prontos:        disp.prontos,
+    opcoes:         opcoesPorVolume(disp, volumes),
+    sob_encomenda:  disp.sob_encomenda,
+    envases_sem_laboratorio: disp.envases_sem_laboratorio,
+    unidades_de_outros_labs: disp.unidades_de_outros_labs,
+  }
+}
+
+// ─── SINCRONIZAÇÃO COM A LOJA (WooCommerce) ───────────────────────────────────
+// A loja LÊ daqui e escreve `stock_quantity` nas variações. Protegido por
+// segredo compartilhado (middleware syncSecret) — é chamada servidor-a-servidor
+// do PHP da loja, nunca do navegador do comprador.
+
+const TETO_SYNC = 2000   // guarda de sanidade; o catálogo real tem ~516 projetos
+
+/**
+ * GET /api/public/catalog/stock
+ *
+ * ATENÇÃO — CONTRATO DE SEGURANÇA: AUSÊNCIA NÃO SIGNIFICA "ESGOTADO".
+ * Projeto inativo ou fora do catálogo simplesmente NÃO aparece em `itens`.
+ * Quem consome DEVE agir só sobre os SKUs presentes e ignorar o resto. Tratar
+ * "sumiu da lista" como "zera o estoque" faz um soluço de rede zerar a loja
+ * inteira. Por isso vão juntos `completo`, `total_publicaveis` e
+ * `total_emitidos`: se `completo` for false, NÃO sincronize nesta rodada.
+ */
+async function stock (req, res) {
+  try {
+    const hoje = new Date().toISOString().slice(0, 10)
+
+    const publicaveis = await db('products')
+      .where('active', true)
+      .whereNotNull('catalog_status')
+      .whereNotNull('sku')
+      .where('sku', '!=', '')
+      .select('id', 'sku', 'project_name', 'catalog_status')
+      .orderBy('sku', 'asc')
+      .limit(TETO_SYNC + 1)
+
+    const estourou = publicaveis.length > TETO_SYNC
+    const linhas = estourou ? publicaveis.slice(0, TETO_SYNC) : publicaveis
+
+    // `products.sku` NÃO tem índice único (migration 20260513_004 só indexa) e
+    // a base tem variante fora do padrão. Se dois projetos dividem o mesmo SKU,
+    // a loja gravaria o estoque de um na ficha do outro — então SKU ambíguo é
+    // RECUSADO aqui, não adivinhado, e sai na lista para alguém arrumar.
+    const porSku = {}
+    for (const r of linhas) {
+      const k = String(r.sku).trim()
+      porSku[k] = porSku[k] || []
+      porSku[k].push(r)
+    }
+    const ambiguos = Object.keys(porSku).filter(k => porSku[k].length > 1)
+    const unicos = Object.keys(porSku)
+      .filter(k => porSku[k].length === 1)
+      .map(k => porSku[k][0])
+
+    const disp = await buildAvailability(unicos.map(r => r.id))
+
+    // Volumes publicáveis = os da tabela de preços vigente do projeto.
+    const precos = unicos.length
+      ? await db('price_lists')
+        .whereIn('product_id', unicos.map(r => r.id))
+        .where('price', '>', 0)
+        .where('valid_from', '<=', hoje)
+        .where(function () { this.whereNull('valid_to').orWhere('valid_to', '>=', hoje) })
+        .select('product_id', db.raw('CAST(volume_ml AS float) as volume_ml'))
+      : []
+
+    const volumesDe = {}
+    for (const p of precos) {
+      volumesDe[p.product_id] = volumesDe[p.product_id] || []
+      if (!volumesDe[p.product_id].includes(p.volume_ml)) volumesDe[p.product_id].push(p.volume_ml)
+    }
+
+    const itens = unicos.map(r => {
+      const d = disp[r.id] || null
+      return {
+        sku:            String(r.sku).trim(),
+        product_id:     r.id,
+        projeto:        r.project_name,
+        catalog_status: r.catalog_status,
+        laboratorio_id: d ? d.laboratorio_id : null,
+        liquido_ml:     d ? d.liquido_ml : 0,
+        volumes:        d ? opcoesPorVolume(d, volumesDe[r.id] || []) : [],
+        sob_encomenda:  d ? d.sob_encomenda : null,
+        envases_sem_laboratorio: d ? d.envases_sem_laboratorio : 0,
+        unidades_de_outros_labs: d ? d.unidades_de_outros_labs : 0,
+      }
+    })
+
+    res.json({
+      gerado_em:         new Date().toISOString(),
+      completo:          !estourou,
+      total_publicaveis: linhas.length,
+      total_emitidos:    itens.length,
+      skus_ambiguos:     ambiguos,
+      aviso: 'Aja somente sobre os SKUs presentes em itens. Ausencia NAO significa esgotado.',
+      itens,
+    })
+  } catch (error) {
+    console.error('[catalog] stock error:', error)
+    res.status(500).json({ error: 'Erro ao montar o estoque para sincronizacao' })
+  }
+}
+
+/**
+ * POST /api/public/catalog/validate-cart
+ * Body: { itens: [{ sku, volume_ml, quantidade }] }
+ *
+ * O `stock_quantity` por variação não representa o orçamento COMPARTILHADO de
+ * ml — com 60ml o 15ml mostra 4 e o 30ml mostra 2, mas 4+2 pede 150ml. Este
+ * endpoint é o que o carrinho da loja chama para fechar essa brecha.
+ */
+async function validateCart (req, res) {
+  try {
+    const itens = Array.isArray(req.body && req.body.itens) ? req.body.itens : []
+    if (!itens.length) return res.status(422).json({ error: 'Carrinho vazio' })
+
+    const skus = [...new Set(itens.map(i => String(i.sku || '').trim()).filter(Boolean))]
+    if (!skus.length) return res.status(422).json({ error: 'Nenhum SKU informado' })
+
+    const produtos = await db('products')
+      .whereIn('sku', skus)
+      .where('active', true)
+      .whereNotNull('catalog_status')
+      .select('id', 'sku', 'project_name')
+
+    const porSku = {}
+    for (const p of produtos) {
+      const k = String(p.sku).trim()
+      porSku[k] = porSku[k] || []
+      porSku[k].push(p)
+    }
+
+    const disp = await buildAvailability(produtos.map(p => p.id))
+    const problemas = []
+
+    for (const sku of skus) {
+      const achados = porSku[sku] || []
+      if (achados.length === 0) {
+        problemas.push({ sku, motivo: 'sku_desconhecido' })
+        continue
+      }
+      if (achados.length > 1) {
+        // Mesmo caso do /stock: não adivinhar de qual projeto é o estoque.
+        problemas.push({ sku, motivo: 'sku_ambiguo', projetos: achados.length })
+        continue
+      }
+      const p = achados[0]
+      const doSku = itens.filter(i => String(i.sku || '').trim() === sku)
+      const r = validarCarrinho(disp[p.id], doSku)
+      if (!r.ok) {
+        problemas.push({
+          sku,
+          projeto:             p.project_name,
+          motivo:              'orcamento_ml',
+          ml_necessario:       r.ml_necessario,
+          ml_disponivel:       r.ml_disponivel,
+          falta_ml:            r.falta_ml,
+          prontos_usados:      r.prontos_usados,
+          cobre_por_encomenda: r.cobre_por_encomenda,
+          previsao:            r.previsao,
+        })
+      }
+    }
+
+    res.json({ ok: problemas.length === 0, problemas })
+  } catch (error) {
+    console.error('[catalog] validateCart error:', error)
+    res.status(500).json({ error: 'Erro ao validar o carrinho' })
+  }
+}
+
+module.exports = { list, brands, createOrder, stock, validateCart }
