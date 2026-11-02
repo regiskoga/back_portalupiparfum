@@ -49,12 +49,22 @@ async function segredoDoBanco () {
     const linha = await db('parameters').where('key', PARAM_KEY).first()
     valor = linha && typeof linha.value === 'string' ? linha.value.trim() : null
   } catch (e) {
-    // Banco fora do ar ou parâmetro inexistente (migration ainda não aplicada):
-    // devolve null e o middleware falha FECHADO. Não é hora de liberar.
+    // Banco fora do ar: devolve null e o middleware falha FECHADO. Não é hora
+    // de liberar.
+    //
+    // Mas NÃO cacheia essa falha. Medido em 02/11/2026, logo após o deploy: a
+    // primeira requisição depois de subir o container pegou o banco ainda
+    // acordando, e o `null` cacheado fez os dois endpoints responderem 503 por
+    // 30 segundos com o segredo corretamente configurado. Para o estoque isso
+    // é só uma rodada perdida; para um PEDIDO PAGO chegando nessa janela é
+    // dinheiro que entrou sem pedido no sistema (o plugin reagenda, mas depende
+    // dele). Sem cachear o erro, a requisição seguinte já tenta de novo.
     console.error('[syncSecret] falha ao ler o parametro:', e.message)
-    valor = null
+    return null
   }
 
+  // Ausência da linha (migration não aplicada) ou valor em branco SÃO cacheáveis:
+  // é estado estável do banco, não falha transitória.
   cache = { valor, expira: agora + CACHE_MS }
   return valor
 }
