@@ -1,5 +1,6 @@
 const { db } = require('../models/db')
 const { buildAvailability, opcoesPorVolume, validarCarrinho } = require('../services/catalogAvailability')
+const { precosDoBanco } = require('../services/precosSite')
 
 async function list(req, res) {
   try {
@@ -288,6 +289,12 @@ async function stock (req, res) {
 
     const disp = await buildAvailability(unicos.map(r => r.id))
 
+    // Preco do SITE por tamanho de frasco (parametro `precos_site`). Nao e o
+    // `price_lists`, que e do sistema e serve a tela de Vendas — as duas
+    // tabelas divergem ~20% por decisao do dono. Volume sem preco legivel sai
+    // sem `preco`, e quem consome nao mexe no preco daquela variacao.
+    const precoDoVolume = await precosDoBanco()
+
     // Volumes publicáveis = os da tabela de preços vigente do projeto.
     const precos = unicos.length
       ? await db('price_lists')
@@ -313,7 +320,13 @@ async function stock (req, res) {
         catalog_status: r.catalog_status,
         laboratorio_id: d ? d.laboratorio_id : null,
         liquido_ml:     d ? d.liquido_ml : 0,
-        volumes:        d ? opcoesPorVolume(d, volumesDe[r.id] || []) : [],
+        volumes: d
+          ? opcoesPorVolume(d, volumesDe[r.id] || []).map(v => (
+            precoDoVolume[v.volume_ml] !== undefined
+              ? { ...v, preco: precoDoVolume[v.volume_ml] }
+              : v
+          ))
+          : [],
         sob_encomenda:  d ? d.sob_encomenda : null,
         envases_sem_laboratorio: d ? d.envases_sem_laboratorio : 0,
         unidades_de_outros_labs: d ? d.unidades_de_outros_labs : 0,
@@ -335,6 +348,10 @@ async function stock (req, res) {
       total_publicaveis: linhas.length,
       total_emitidos:    itens.length,
       skus_ambiguos:     ambiguos,
+      // Quais tamanhos tem preco configurado. Vai no payload para a loja poder
+      // dizer na tela o que ficara sem alteracao, em vez de o dono descobrir
+      // pelo preco que nao mudou.
+      precos_por_volume: precoDoVolume,
       aviso: 'Aja somente sobre os SKUs presentes em itens. Ausencia NAO significa esgotado.',
       itens,
     })

@@ -1,4 +1,5 @@
 const { invalidarCacheDoSegredo, PARAM_KEY: SYNC_SECRET_KEY } = require('../middleware/syncSecret')
+const { invalidarCacheDePrecos, PARAM_KEY: PRECOS_SITE_KEY } = require('../services/precosSite')
 const { db } = require('../models/db')
 
 async function getAll (req, res) {
@@ -36,6 +37,7 @@ async function update (req, res) {
     // valor novo valer na hora — senao quem acabou de colar o segredo na tela
     // leva meio minuto de 401 sem entender por que.
     if (Object.keys(updates).includes(SYNC_SECRET_KEY)) invalidarCacheDoSegredo()
+    if (Object.keys(updates).includes(PRECOS_SITE_KEY)) invalidarCacheDePrecos()
 
     const rows = await db('parameters').select('*').orderBy('key')
     res.json(rows)
