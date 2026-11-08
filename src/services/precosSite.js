@@ -92,4 +92,79 @@ function invalidarCacheDePrecos () {
   cache = { valor: null, expira: 0 }
 }
 
-module.exports = { precosDoBanco, parsePrecos, invalidarCacheDePrecos, PARAM_KEY }
+// ═══════════════════════════════════════════════════════════════════════════
+// Preço do site COM exceção por projeto
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A exceção que o comentário no topo deste arquivo previu existe desde
+// 08/11/2026: `price_lists.site_price`, lançado na mesma tela Tabela de Preços,
+// na mesma linha (projeto + volume + vigência) do "Preço sugerido".
+//
+// PRECEDÊNCIA, em uma frase: o preço do próprio perfume ganha; sem ele, vale a
+// tabela por frasco; sem nenhum dos dois, o volume não sai (falha fechada).
+//
+//   1. `price_lists.site_price` VIGENTE do projeto, para aquele volume
+//   2. o parâmetro `precos_site`, por tamanho de frasco
+//   3. nenhum → o volume NÃO é publicado
+//
+// `site_price` é coluna separada de propósito. `price_lists.price` ("Preço
+// sugerido" na tela) é o preço do SISTEMA, que a tela de Vendas usa para montar
+// pedido, e em 08/11/2026 estava 20% abaixo do site nos 73 projetos com preço.
+// Ler `price` no site cortaria o preço da loja em ~R$ 18,50 por variação.
+async function montarPrecosDoSite (productIds) {
+  const tabela = await precosDoBanco()
+  const hoje = new Date().toISOString().slice(0, 10)
+
+  // Volumes que a tabela base cobre. Chave de objeto é string: normaliza para
+  // número uma vez aqui, para não comparar '15' com 15 mais na frente.
+  const volumesBase = Object.keys(tabela).map(Number).filter(v => v > 0).sort((a, b) => a - b)
+
+  const ids = [...new Set((productIds || []).map(Number).filter(Boolean))]
+
+  // Exceções: só as linhas VIGENTES com `site_price` preenchido. `price` não
+  // entra na conta — uma linha pode ter preço de site sem ter preço de sistema
+  // (e o 3ml, que está gravado com price = 0, é exatamente esse caso).
+  const linhas = ids.length
+    ? await db('price_lists')
+      .whereIn('product_id', ids)
+      .whereNotNull('site_price')
+      .where('site_price', '>', 0)
+      .where('valid_from', '<=', hoje)
+      .where(function () { this.whereNull('valid_to').orWhere('valid_to', '>=', hoje) })
+      .select('product_id', db.raw('CAST(volume_ml AS float) as volume_ml'), db.raw('CAST(site_price AS float) as site_price'))
+      // Desempate quando o mesmo projeto+volume tem duas linhas vigentes
+      // (vigências sobrepostas são permitidas pelo schema): a que começou mais
+      // tarde é a que vale, e é a última a sobrescrever o mapa.
+      .orderBy('valid_from', 'asc')
+    : []
+
+  const excecoes = {}
+  for (const r of linhas) {
+    excecoes[r.product_id] = excecoes[r.product_id] || {}
+    excecoes[r.product_id][r.volume_ml] = r.site_price
+  }
+
+  const precoDe = (productId, volume) => {
+    const v = Number(volume)
+    const propria = excecoes[productId] && excecoes[productId][v]
+    if (propria !== undefined) return propria
+    return tabela[v] !== undefined ? tabela[v] : null
+  }
+
+  // Volumes vendáveis de um projeto: os da tabela base MAIS os que o projeto
+  // tenha de exceção própria fora dela (um 3ml de nicho, por exemplo).
+  const volumesDe = (productId) => {
+    const proprios = Object.keys(excecoes[productId] || {}).map(Number)
+    return [...new Set([...volumesBase, ...proprios])].sort((a, b) => a - b)
+  }
+
+  return { tabela, excecoes, volumesBase, precoDe, volumesDe }
+}
+
+module.exports = {
+  precosDoBanco,
+  parsePrecos,
+  invalidarCacheDePrecos,
+  montarPrecosDoSite,
+  PARAM_KEY,
+}

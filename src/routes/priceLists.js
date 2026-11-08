@@ -10,6 +10,7 @@ const createRules = [
   body('packaging_type_id').optional({ nullable: true }).isInt({ min: 1 }),
   body('volume_ml').optional({ nullable: true }).isFloat({ gt: 0 }).withMessage('Volume deve ser maior que zero'),
   body('price').isFloat({ min: 0 }).withMessage('Preço inválido'),
+  body('site_price').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Preço do site inválido'),
   body('valid_from').isISO8601().withMessage('Data de início inválida'),
   body('valid_to').optional({ nullable: true }).isISO8601().withMessage('Data de fim inválida'),
   body('notes').optional().trim()
@@ -19,6 +20,7 @@ const updateRules = [
   body('packaging_type_id').optional({ nullable: true }).isInt({ min: 1 }),
   body('volume_ml').optional().isFloat({ gt: 0 }),
   body('price').optional().isFloat({ min: 0 }),
+  body('site_price').optional({ nullable: true }).isFloat({ min: 0 }),
   body('valid_from').optional().isISO8601(),
   body('valid_to').optional({ nullable: true }).isISO8601(),
   body('notes').optional().trim()

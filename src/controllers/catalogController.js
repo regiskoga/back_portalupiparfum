@@ -1,12 +1,11 @@
 const { db } = require('../models/db')
 const { buildAvailability, opcoesPorVolume, validarCarrinho } = require('../services/catalogAvailability')
-const { precosDoBanco } = require('../services/precosSite')
+const { montarPrecosDoSite } = require('../services/precosSite')
 
 async function list(req, res) {
   try {
     const { marca, genero, busca, page = 1, limit = 24 } = req.query
     const offset = (parseInt(page) - 1) * parseInt(limit)
-    const today = new Date().toISOString().slice(0, 10)
 
     let query = db('products as p')
       .where('p.active', true)
@@ -56,27 +55,40 @@ async function list(req, res) {
 
     const ids = produtos.map(p => p.id)
 
-    // Preços vigentes (sem custo — só volume + preço + nome da embalagem)
-    const prices = await db('price_lists as pl')
-      .leftJoin('packaging_types as pt', 'pt.id', 'pl.packaging_type_id')
-      .whereIn('pl.product_id', ids)
-      .where('pl.price', '>', 0)
-      .where('pl.valid_from', '<=', today)
-      .where(function () {
-        this.whereNull('pl.valid_to').orWhere('pl.valid_to', '>=', today)
-      })
-      .select('pl.product_id', db.raw('CAST(pl.volume_ml AS float) as volume_ml'), 'pl.price', 'pt.name as packaging_name')
-      .orderBy('pl.volume_ml', 'asc')
+    // Preço de venda no SITE (sem custo — só volume + preço + nome da
+    // embalagem): exceção do projeto em `price_lists.site_price` e, sem ela, a
+    // tabela por frasco do parâmetro `precos_site`. Ver services/precosSite.js.
+    //
+    // NÃO é mais o `price` da `price_lists`: até 08/11/2026 esta vitrine
+    // mostrava o preço do SISTEMA (37,90) enquanto a loja cobrava o do SITE
+    // (49,90) — dois preços seus para o mesmo frasco, e o cliente que
+    // comparasse via a diferença.
+    const precos = await montarPrecosDoSite(ids)
+
+    // Nome da embalagem por volume. Antes vinha do `packaging_type_id` da linha
+    // de preço; agora o volume pode vir da tabela base, sem linha nenhuma, então
+    // o nome é resolvido pelo volume — senão o chip da vitrine viraria "15ml"
+    // seco onde antes dizia "Frasco 15ml".
+    const embalagens = await db('packaging_types')
+      .select('name', db.raw('CAST(volume_ml AS float) as volume_ml'))
+      .orderBy('id', 'asc')
+    const nomeDoVolume = {}
+    for (const e of embalagens) {
+      if (nomeDoVolume[e.volume_ml] === undefined) nomeDoVolume[e.volume_ml] = e.name
+    }
 
     const priceMap = {}
-    prices.forEach(r => {
-      if (!priceMap[r.product_id]) priceMap[r.product_id] = []
-      priceMap[r.product_id].push({
-        volume_ml:      r.volume_ml,
-        price:          parseFloat(r.price),
-        packaging_name: r.packaging_name || `${r.volume_ml}ml`
-      })
-    })
+    for (const p of produtos) {
+      priceMap[p.id] = precos.volumesDe(p.id)
+        .map(v => ({
+          volume_ml:      v,
+          price:          precos.precoDe(p.id, v),
+          packaging_name: nomeDoVolume[v] || `${v}ml`,
+        }))
+        // Volume sem preço em nenhuma das duas fontes não é oferecido: é a
+        // mesma falha fechada do /stock. Publicar sem preço é pior que omitir.
+        .filter(x => x.price !== null)
+    }
 
     // Disponibilidade por projeto x laboratório (ver services/catalogAvailability).
     // A query anterior ia por bottling_batches -> batches -> formulas.product_id e
@@ -258,8 +270,6 @@ const TETO_SYNC = 2000   // guarda de sanidade; o catálogo real tem ~516 projet
  */
 async function stock (req, res) {
   try {
-    const hoje = new Date().toISOString().slice(0, 10)
-
     const publicaveis = await db('products')
       .where('active', true)
       .whereNotNull('catalog_status')
@@ -289,27 +299,22 @@ async function stock (req, res) {
 
     const disp = await buildAvailability(unicos.map(r => r.id))
 
-    // Preco do SITE por tamanho de frasco (parametro `precos_site`). Nao e o
-    // `price_lists`, que e do sistema e serve a tela de Vendas — as duas
-    // tabelas divergem ~20% por decisao do dono. Volume sem preco legivel sai
-    // sem `preco`, e quem consome nao mexe no preco daquela variacao.
-    const precoDoVolume = await precosDoBanco()
-
-    // Volumes publicáveis = os da tabela de preços vigente do projeto.
-    const precos = unicos.length
-      ? await db('price_lists')
-        .whereIn('product_id', unicos.map(r => r.id))
-        .where('price', '>', 0)
-        .where('valid_from', '<=', hoje)
-        .where(function () { this.whereNull('valid_to').orWhere('valid_to', '>=', hoje) })
-        .select('product_id', db.raw('CAST(volume_ml AS float) as volume_ml'))
-      : []
-
-    const volumesDe = {}
-    for (const p of precos) {
-      volumesDe[p.product_id] = volumesDe[p.product_id] || []
-      if (!volumesDe[p.product_id].includes(p.volume_ml)) volumesDe[p.product_id].push(p.volume_ml)
-    }
+    // Preco do SITE por volume, com a precedencia de services/precosSite.js:
+    // a excecao do proprio projeto (`price_lists.site_price`) ganha; sem ela
+    // vale a tabela por frasco (parametro `precos_site`); sem nenhuma das duas
+    // o volume sai sem `preco`, e quem consome nao mexe no preco daquela
+    // variacao.
+    //
+    // NAO e o `price_lists.price`: esse e o "Preco sugerido" da tela, o preco do
+    // SISTEMA que a tela de Vendas usa, ~20% abaixo do site por decisao do dono.
+    //
+    // MUDOU EM 08/11/2026: antes os volumes publicaveis vinham SO da
+    // `price_lists` vigente, entao projeto sem linha de preco saia com
+    // `volumes: []` e a loja nao mexia em nada dele. Agora a tabela por frasco
+    // tambem gera volume, e projeto sem saldo sai com `maximo: 0` — o que a
+    // loja escreve como "sem estoque" com o preco certo, em vez de deixar a
+    // ficha com o preco velho.
+    const precos = await montarPrecosDoSite(unicos.map(r => r.id))
 
     const itens = unicos.map(r => {
       const d = disp[r.id] || null
@@ -321,11 +326,10 @@ async function stock (req, res) {
         laboratorio_id: d ? d.laboratorio_id : null,
         liquido_ml:     d ? d.liquido_ml : 0,
         volumes: d
-          ? opcoesPorVolume(d, volumesDe[r.id] || []).map(v => (
-            precoDoVolume[v.volume_ml] !== undefined
-              ? { ...v, preco: precoDoVolume[v.volume_ml] }
-              : v
-          ))
+          ? opcoesPorVolume(d, precos.volumesDe(r.id)).map(v => {
+            const preco = precos.precoDe(r.id, v.volume_ml)
+            return preco === null ? v : { ...v, preco }
+          })
           : [],
         sob_encomenda:  d ? d.sob_encomenda : null,
         envases_sem_laboratorio: d ? d.envases_sem_laboratorio : 0,
@@ -351,7 +355,11 @@ async function stock (req, res) {
       // Quais tamanhos tem preco configurado. Vai no payload para a loja poder
       // dizer na tela o que ficara sem alteracao, em vez de o dono descobrir
       // pelo preco que nao mudou.
-      precos_por_volume: precoDoVolume,
+      precos_por_volume: precos.tabela,
+      // Quantos projetos tem preco PROPRIO de site hoje (a excecao por
+      // cima da tabela). Vai no payload para o relatorio da loja poder
+      // dizer "este preco nao e o da tabela" sem adivinhar.
+      projetos_com_preco_proprio: Object.keys(precos.excecoes).length,
       aviso: 'Aja somente sobre os SKUs presentes em itens. Ausencia NAO significa esgotado.',
       itens,
     })
@@ -456,7 +464,23 @@ const LOCK_PEDIDO_LOJA = 528432
 // nas notas, onde não corrompe nada.
 function metodoDePagamento (cru) {
   const t = String(cru || '').toLowerCase()
-  if (t.includes('pix')) return 'Pix'
+
+  // RÓTULO QUE OFERECE AS DUAS FORMAS NÃO DIZ QUAL FOI USADA. O InfinitePay
+  // manda `payment_method_title = "Cartao ou Pix"` no checkout genérico (medido
+  // no pedido #367, de 31/10/2026), e a ordem antiga dos ifs testava `pix`
+  // primeiro — então cartão era gravado como **Pix**, com confiança e errado.
+  // Relatório por forma de pagamento e balancete ficavam cegos para o site.
+  // Ambíguo agora vira `Outro`: vago, mas honesto. O texto cru do gateway já vai
+  // para as notas do pedido, que é onde se descobre o que foi de fato.
+  //
+  // A correção boa é a loja mandar o SLUG do gateway, que é específico
+  // (`portalupi_infinitepay_pix` no pedido #633 contra `portalupi_infinitepay`
+  // no #367) — depende de mudança no plugin, ainda não feita.
+  const temPix = t.includes('pix')
+  const temCartao = t.includes('cart') || t.includes('credit') || t.includes('debit') || t.includes('card')
+  if (temPix && temCartao) return 'Outro'
+
+  if (temPix) return 'Pix'
   if (t.includes('debit') || t.includes('débito')) return 'Cartão de Débito'
   if (t.includes('credit') || t.includes('crédito') || t.includes('card')) return 'Cartão de Crédito'
   if (t.includes('transfer')) return 'Transferência'

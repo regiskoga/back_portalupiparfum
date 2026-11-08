@@ -45,7 +45,7 @@ async function list (req, res) {
 // ─── CREATE ───────────────────────────────────────────────────────────────────
 async function create (req, res) {
   try {
-    const { product_id, packaging_type_id = null, volume_ml, price, valid_from, valid_to = null, notes = '' } = req.body
+    const { product_id, packaging_type_id = null, volume_ml, price, site_price = null, valid_from, valid_to = null, notes = '' } = req.body
 
     const product = await db('products').where('id', parseInt(product_id)).first()
     if (!product) return res.status(400).json({ error: 'Projeto não encontrado' })
@@ -63,6 +63,9 @@ async function create (req, res) {
       packaging_type_id: resolvedPtId,
       volume_ml: resolvedVolume,
       price: parseFloat(price),
+      // Preco do SITE: vazio fica NULL, nao 0. NULL quer dizer "sem excecao,
+      // usa a tabela por frasco"; 0 significaria vender de graca.
+      site_price: site_price === null || site_price === '' ? null : parseFloat(site_price),
       valid_from,
       valid_to: valid_to || null,
       notes
@@ -87,11 +90,14 @@ async function update (req, res) {
     const existing = await db('price_lists').where('id', parseInt(req.params.id)).first()
     if (!existing) return res.status(404).json({ error: 'Preço não encontrado' })
 
-    const { volume_ml, packaging_type_id, price, valid_from, valid_to, notes } = req.body
+    const { volume_ml, packaging_type_id, price, site_price, valid_from, valid_to, notes } = req.body
     const updateData = { updated_at: db.fn.now() }
     if (volume_ml         !== undefined) updateData.volume_ml         = parseFloat(volume_ml)
     if (packaging_type_id !== undefined) updateData.packaging_type_id = packaging_type_id ? parseInt(packaging_type_id) : null
     if (price             !== undefined) updateData.price             = parseFloat(price)
+    // Mesma regra do create: limpar o campo na tela volta a valer a tabela
+    // por frasco, e para isso tem de gravar NULL e nao 0.
+    if (site_price        !== undefined) updateData.site_price        = (site_price === null || site_price === '') ? null : parseFloat(site_price)
     if (valid_from        !== undefined) updateData.valid_from        = valid_from
     if (valid_to          !== undefined) updateData.valid_to          = valid_to || null
     if (notes             !== undefined) updateData.notes             = notes
