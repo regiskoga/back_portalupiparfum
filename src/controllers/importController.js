@@ -97,11 +97,27 @@ const TEMPLATE = {
     ]
   },
 
+  // A coluna ID é o que torna esta aba um ROUND-TRIP: a tela de Preços exporta a
+  // planilha já preenchida (ver `exportSheet`), a pessoa mexe nos preços no Excel
+  // e sobe o mesmo arquivo. Com o ID, cada linha volta para a SUA linha do banco.
+  //
+  // Sem ele, o casamento era por (projeto + volume + embalagem) e pegava a
+  // primeira linha encontrada — e um projeto pode ter várias vigências no mesmo
+  // volume (a tela filtra por Vigente/Futuro/Expirado justamente por isso). Subir
+  // três vigências gravava as três na mesma linha, sem erro. Hoje, chave ambígua
+  // sem ID é recusada em vez de adivinhada.
+  //
+  // ID em branco segue válido: é assim que a planilha funciona como template
+  // novo, criando preço que ainda não existe.
+  //
+  // O ID fica na ÚLTIMA coluna de propósito: `sheetToRows` descarta a linha de
+  // exemplo olhando se a PRIMEIRA célula começa com '[EXEMPLO]'. Com o ID na
+  // frente, a linha de exemplo entraria como dado.
   'Preços': {
-    title: 'Tela: Comercial → Preços (produto identificado por Projeto)',
-    headers: ['Projeto', 'Volume (ml)', 'Preço (R$)', 'Válido de', 'Válido até', 'Embalagem', 'Observações'],
+    title: 'Tela: Comercial → Preços — ID preenchido atualiza aquela linha; ID em branco cria. Célula de preço vazia NÃO mexe no preço atual.',
+    headers: ['Projeto', 'Volume (ml)', 'Embalagem', 'Preço sugerido (R$)', 'Preço do site (R$)', 'Válido de', 'Válido até', 'Observações', 'ID'],
     example: [
-      [`${EXAMPLE_MARK} Dragon Tea X`, 30, 87.90, '2026-01-01', '', 'Frasco 30ml', 'Tabela vigente']
+      [`${EXAMPLE_MARK} Dragon Tea X`, 30, 'Frasco 30ml', 87.90, 105.90, '2026-01-01', '', 'Tabela vigente', '']
     ]
   },
 
@@ -184,6 +200,36 @@ function toNumber (v) {
 function toString (v) {
   if (v == null) return ''
   return String(v).trim()
+}
+
+// Dinheiro vindo de celula que uma PESSOA editou no Excel. `toNumber` resolve
+// "105,90", mas nao "R$ 105,90" nem "1.234,56" - e e justamente isso que sai de
+// uma planilha pt-BR com a coluna formatada como moeda.
+// So a aba Precos usa isto: as outras seguem no `toNumber` para nao mudarem de
+// comportamento sem necessidade.
+function toMoney (v) {
+  if (v == null || v === '') return null
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  let s = String(v).trim().replace(/^r\$\s*/i, '').replace(/\s/g, '')
+  if (s === '') return null
+  // "1.234,56" -> "1234.56";  "1234,56" -> "1234.56";  "1234.56" fica como esta.
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.')
+  const n = parseFloat(s)
+  return Number.isFinite(n) ? n : null
+}
+
+// Na aba Preços, célula VAZIA significa "não mexer" — decisão do dono em
+// 09/11/2026: quem baixa 500 linhas, edita 3 e sobe não pode zerar as outras 497.
+// `site_price` nulo também não é "vazio": significa "sem exceção, use a tabela
+// por frasco do parâmetro precos_site". Então esvaziar precisa ser dito com
+// palavra, nunca com célula em branco.
+const LIMPA_CELULA = new Set(['-', '—', 'limpar', 'vazio'])
+// A tela escreve literalmente "tabela por frasco" na célula de preço do site
+// quando não há preço próprio. Aceitar a mesma palavra de volta é o que fecha o
+// round-trip: o que saiu da tela volta sem precisar de edição.
+const LIMPA_PRECO_SITE = new Set([...LIMPA_CELULA, 'tabela', 'tabela por frasco'])
+function pedeLimpar (txt, conjunto = LIMPA_CELULA) {
+  return conjunto.has(String(txt).trim().toLowerCase())
 }
 
 function normalizeGender (v) {
@@ -980,38 +1026,122 @@ async function processEmbalagens (trx, rows, dryRun) {
 async function processPrecos (trx, rows, dryRun) {
   const errors = []; let ok = 0
   for (const r of rows) {
+    // ── 1. Que linha do BANCO esta linha da planilha é.
+    const idCru = toNumber(getCol(r, 'ID', 'Id'))
+    let existing = null
+    if (idCru != null) {
+      const id = Math.trunc(idCru)
+      existing = await trx('price_lists').where('id', id).first()
+      if (!existing) {
+        errors.push({ row: r._row, msg: `ID ${id} não existe na tabela de preços — linha ignorada. Para criar um preço novo, deixe a coluna ID em branco.` })
+        continue
+      }
+    }
+
+    // ── 2. Projeto. Obrigatório só na linha NOVA: na linha com ID o projeto já
+    //      está gravado, e a coluna serve de conferência para quem lê a planilha.
     const projetoNome = toString(getCol(r, 'Projeto'))
-    const preco = toNumber(getCol(r, 'Preço (R$)', 'Preço', 'Preco'))
-    if (!projetoNome) { errors.push({ row: r._row, msg: 'Projeto em branco — linha ignorada' }); continue }
-    if (preco == null || preco < 0) { errors.push({ row: r._row, msg: `Preço inválido para "${projetoNome}" — linha ignorada` }); continue }
-    if (dryRun) { ok++; continue }
+    let product = null
+    if (projetoNome) {
+      product = await findProduct(trx, { commercialName: projetoNome, projectName: projetoNome })
+      if (!product) { errors.push({ row: r._row, msg: `Projeto "${projetoNome}" não encontrado — linha ignorada` }); continue }
+    } else if (!existing) {
+      errors.push({ row: r._row, msg: 'Projeto em branco — linha ignorada' }); continue
+    }
 
-    const product = await findProduct(trx, { commercialName: projetoNome, projectName: projetoNome })
-    if (!product) { errors.push({ row: r._row, msg: `Projeto "${projetoNome}" não encontrado — preço ignorado` }); continue }
-
+    // ── 3. Embalagem e volume.
     const embNome = toString(getCol(r, 'Embalagem'))
-    const pt = embNome ? await findPackagingType(trx, embNome) : null
-    if (embNome && !pt) errors.push({ row: r._row, msg: `Embalagem "${embNome}" não encontrada — preço salvo sem embalagem` })
-
+    const limparEmb = embNome !== '' && pedeLimpar(embNome)
+    let pt = null
+    if (embNome !== '' && !limparEmb) {
+      pt = await findPackagingType(trx, embNome)
+      if (!pt) errors.push({ row: r._row, msg: `Embalagem "${embNome}" não encontrada — a linha mantém a embalagem que já tinha` })
+    }
     let volume = toNumber(getCol(r, 'Volume (ml)', 'Volume'))
     if (volume == null && pt) volume = parseFloat(pt.volume_ml)
-    if (volume == null || volume <= 0) { errors.push({ row: r._row, msg: `Volume ausente para "${projetoNome}" — preço ignorado` }); continue }
-
-    const data = {
-      product_id: product.id,
-      packaging_type_id: pt ? pt.id : null,
-      volume_ml: volume,
-      price: preco,
-      valid_from: parseExcelDate(getCol(r, 'Válido de', 'Valido de')) || new Date().toISOString().slice(0, 10),
-      valid_to: parseExcelDate(getCol(r, 'Válido até', 'Valido ate')),
-      notes: toString(getCol(r, 'Observações', 'Observacoes'))
+    if (volume == null && !existing) {
+      errors.push({ row: r._row, msg: `Volume ausente para "${projetoNome}" — linha ignorada` }); continue
     }
-    // Upsert por (product_id, volume_ml, packaging_type_id) — preço vigente por produto/volume/embalagem.
-    let q = trx('price_lists').where('product_id', product.id).where('volume_ml', volume)
-    q = pt ? q.where('packaging_type_id', pt.id) : q.whereNull('packaging_type_id')
-    const existing = await q.first()
-    if (existing) await trx('price_lists').where('id', existing.id).update(data)
-    else await trx('price_lists').insert(data)
+
+    // ── 4. Sem ID: acha a linha por (projeto + volume + embalagem). Mais de uma
+    //      candidata é RECUSA, não escolha — um projeto pode ter várias vigências
+    //      no mesmo volume, e adivinhar aqui gravava três linhas da planilha em
+    //      cima de uma só, sem erro nenhum.
+    if (!existing) {
+      let q = trx('price_lists').where('product_id', product.id).where('volume_ml', volume)
+      q = pt ? q.where('packaging_type_id', pt.id) : q.whereNull('packaging_type_id')
+      const candidatas = await q.orderBy('valid_from', 'desc')
+      if (candidatas.length > 1) {
+        errors.push({ row: r._row, msg: `"${projetoNome}" ${volume}ml tem ${candidatas.length} vigências cadastradas — preencha a coluna ID para dizer qual delas atualizar. Linha ignorada.` })
+        continue
+      }
+      existing = candidatas[0] || null
+    }
+
+    // ── 5. Os dois preços. Vazio = NÃO MEXER (ver LIMPA_CELULA acima).
+    const precoCru = toString(getCol(r, 'Preço sugerido (R$)', 'Preço (R$)', 'Preço', 'Preco'))
+    const preco    = toMoney(getCol(r, 'Preço sugerido (R$)', 'Preço (R$)', 'Preço', 'Preco'))
+    if (precoCru !== '' && (preco == null || preco < 0)) {
+      errors.push({ row: r._row, msg: `Preço sugerido "${precoCru}" não é um valor válido — linha ignorada` }); continue
+    }
+    if (preco == null && !existing) {
+      errors.push({ row: r._row, msg: `Preço sugerido em branco para "${projetoNome}" — linha ignorada (preço novo precisa de valor)` }); continue
+    }
+
+    // `undefined` = não mexer;  `null` = voltar para a tabela por frasco do site.
+    let sitePrice
+    const siteCru = toString(getCol(r, 'Preço do site (R$)', 'Preço do site', 'Preco do site'))
+    if (siteCru !== '') {
+      if (pedeLimpar(siteCru, LIMPA_PRECO_SITE)) sitePrice = null
+      else {
+        const n = toMoney(siteCru)
+        if (n == null || n < 0) errors.push({ row: r._row, msg: `Preço do site "${siteCru}" não é um valor válido — mantido o que já estava` })
+        else sitePrice = n
+      }
+    }
+
+    // ── 6. Vigência e observações, mesma regra do preço.
+    const validFrom  = parseExcelDate(getCol(r, 'Válido de', 'Valido de'))
+    const validToCru = toString(getCol(r, 'Válido até', 'Valido ate'))
+    let validTo
+    if (validToCru !== '') {
+      if (pedeLimpar(validToCru)) validTo = null
+      else {
+        const d = parseExcelDate(getCol(r, 'Válido até', 'Valido ate'))
+        if (!d) errors.push({ row: r._row, msg: `Válido até "${validToCru}" não é uma data reconhecida — mantida a vigência atual` })
+        else validTo = d
+      }
+    }
+    const notesCru = toString(getCol(r, 'Observações', 'Observacoes'))
+    let notes
+    if (notesCru !== '') notes = pedeLimpar(notesCru) ? '' : notesCru
+
+    if (dryRun) { ok++; continue }
+
+    if (existing) {
+      const data = { updated_at: trx.fn.now() }
+      if (product)                 data.product_id        = product.id
+      if (volume != null)          data.volume_ml         = volume
+      if (pt)                      data.packaging_type_id = pt.id
+      if (limparEmb)               data.packaging_type_id = null
+      if (preco != null)           data.price             = preco
+      if (sitePrice !== undefined) data.site_price        = sitePrice
+      if (validFrom)               data.valid_from        = validFrom
+      if (validTo !== undefined)   data.valid_to          = validTo
+      if (notes !== undefined)     data.notes             = notes
+      await trx('price_lists').where('id', existing.id).update(data)
+    } else {
+      await trx('price_lists').insert({
+        product_id:        product.id,
+        packaging_type_id: pt ? pt.id : null,
+        volume_ml:         volume,
+        price:             preco,
+        site_price:        sitePrice === undefined ? null : sitePrice,
+        valid_from:        validFrom || new Date().toISOString().slice(0, 10),
+        valid_to:          validTo === undefined ? null : validTo,
+        notes:             notes === undefined ? '' : notes
+      })
+    }
     ok++
   }
   return { ok, errors }
@@ -1319,6 +1449,124 @@ function buildTemplateBuffer (only = null) {
   return xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' })
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// EXPORTAÇÃO PARA EDIÇÃO (round-trip)
+// ══════════════════════════════════════════════════════════════════════════════
+// O botão "⭳ Excel" da topbar (frontend/crud/src/utils/export-excel.js) raspa a
+// tabela HTML da tela: sai com "R$ 87,90", "30 ml", vigência em duas linhas na
+// mesma célula e sem chave nenhuma. Serve para olhar, NÃO para voltar.
+//
+// Isto aqui é o contrário: escreve exatamente o layout que `TEMPLATE[aba]`
+// declara e que o processador da aba sabe ler, com a coluna ID preenchida. Baixa,
+// edita no Excel, sobe o MESMO arquivo em /import/preview e /import/commit.
+//
+// Por que vive no mesmo arquivo do TEMPLATE e dos processadores: um exportador
+// escrito à parte é como as duas pontas saem de sincronia seis meses depois. Aqui
+// a ordem das colunas vem de `def.headers`, então renomear ou mover coluna no
+// template move na exportação junto, sem ninguém lembrar de fazer isso.
+
+function ymd (v) {
+  if (!v) return ''
+  if (v instanceof Date) {
+    // Montado dos componentes LOCAIS de propósito: coluna `date` do pg volta como
+    // meia-noite local, e toISOString() empurraria para o dia anterior em
+    // qualquer fuso a oeste de Greenwich.
+    const pad = n => String(n).padStart(2, '0')
+    return `${v.getFullYear()}-${pad(v.getMonth() + 1)}-${pad(v.getDate())}`
+  }
+  return String(v).slice(0, 10)
+}
+
+async function exportRowsPrecos (query) {
+  let q = db('price_lists as pl')
+    .join('products as p', 'p.id', 'pl.product_id')
+    .leftJoin('packaging_types as pt', 'pt.id', 'pl.packaging_type_id')
+    .select('pl.*', 'p.project_name', 'pt.name as packaging_type_name')
+    .orderBy('p.project_name', 'asc')
+    .orderBy('pl.volume_ml', 'asc')
+    .orderBy('pl.valid_from', 'desc')
+
+  if (query.product_id) q = q.where('pl.product_id', parseInt(query.product_id))
+
+  let rows = await q
+
+  // Mesmo cálculo de status da tela (priceListsController.classify). Repetido em
+  // vez de importado porque aquele controller não o exporta, e são três linhas.
+  if (query.status) {
+    const hoje = new Date().toISOString().slice(0, 10)
+    rows = rows.filter(r => {
+      const de  = ymd(r.valid_from)
+      const ate = ymd(r.valid_to)
+      const st = de > hoje ? 'FUTURO' : (ate && ate < hoje ? 'EXPIRADO' : 'VIGENTE')
+      return st === query.status
+    })
+  }
+
+  return rows.map(r => ({
+    'Projeto':              r.project_name,
+    'Volume (ml)':          Number(r.volume_ml),
+    'Embalagem':            r.packaging_type_name || '',
+    'Preço sugerido (R$)':  r.price == null ? '' : Number(r.price),
+    // Vazio na planilha significa "não mexer", então célula vazia NÃO pode ser a
+    // forma de dizer "sem preço próprio" — sairia um arquivo que, re-subido sem
+    // edição, deixaria de descrever o que está no banco. Sai a mesma palavra que
+    // a tela mostra, e o processador a aceita de volta como "use a tabela".
+    'Preço do site (R$)':   r.site_price == null ? 'tabela por frasco' : Number(r.site_price),
+    'Válido de':            ymd(r.valid_from),
+    'Válido até':           ymd(r.valid_to),
+    'Observações':          r.notes || '',
+    'ID':                   r.id
+  }))
+}
+
+// Aba → função que devolve as linhas já no formato do template.
+// Só Preços por enquanto; as outras abas seguem só com template em branco.
+const SHEET_EXPORTERS = {
+  'Preços': exportRowsPrecos
+}
+
+function buildExportBuffer (sheetName, objetos) {
+  const def = TEMPLATE[sheetName]
+  const aoa = [
+    [def.title],
+    def.headers,
+    ...objetos.map(o => def.headers.map(h => (o[h] === undefined || o[h] === null ? '' : o[h])))
+  ]
+  const ws = xlsx.utils.aoa_to_sheet(aoa)
+  ws['!cols'] = def.headers.map(h => ({ wch: Math.max(12, Math.min(h.length + 6, 40)) }))
+  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: def.headers.length - 1 } }]
+  const wb = xlsx.utils.book_new()
+  xlsx.utils.book_append_sheet(wb, ws, sheetName)
+  return xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' })
+}
+
+async function exportSheet (req, res) {
+  try {
+    const sheet = req.query.sheet
+    if (!sheet || !SHEET_EXPORTERS[sheet]) {
+      return res.status(400).json({
+        error: `Aba "${sheet || ''}" não tem exportação com dados. Disponíveis: ${Object.keys(SHEET_EXPORTERS).join(', ')}`
+      })
+    }
+    const objetos = await SHEET_EXPORTERS[sheet](req.query)
+    const buf = buildExportBuffer(sheet, objetos)
+    const stamp = new Date().toISOString().slice(0, 10)
+    const nome = `${sheet.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '_').toLowerCase()}_atual_${stamp}.xlsx`
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="${nome}"`,
+      'X-Portalupi-Linhas': String(objetos.length),
+      // Sem isto o navegador NAO le o header acima: front e API estao em origens
+      // diferentes, e o CORS global (server.js) nao expoe header nenhum. Exposto
+      // so aqui, so este, para nao mexer na politica compartilhada.
+      'Access-Control-Expose-Headers': 'X-Portalupi-Linhas'
+    })
+    res.send(buf)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
 async function generateTemplate (req, res) {
   try {
     const sheet = req.query.sheet || null
@@ -1386,4 +1634,4 @@ async function commit (req, res) {
   }
 }
 
-module.exports = { generateTemplate, preview, commit }
+module.exports = { generateTemplate, exportSheet, preview, commit }

@@ -1,9 +1,30 @@
 const { db } = require('../models/db')
 
+// `valid_from`/`valid_to` sao colunas DATE, e o driver do Postgres as entrega
+// como objeto Date, nao como string. Comparar Date com 'YYYY-MM-DD' direto
+// ("row.valid_from > today") coage os dois a numero: a Date vira milissegundos e
+// a string vira NaN, e TODA comparacao com NaN e false. O efeito, ate 09/11/2026,
+// era a tela de Precos carimbar "Vigente" em cada linha e os filtros Expirado e
+// Futuro nunca devolverem nada.
+//
+// Montado dos componentes LOCAIS de proposito: coluna DATE volta como meia-noite
+// local, e toISOString() empurraria para o dia anterior em qualquer fuso a oeste
+// de Greenwich (o nosso).
+function ymd (v) {
+  if (!v) return ''
+  if (v instanceof Date) {
+    const pad = n => String(n).padStart(2, '0')
+    return `${v.getFullYear()}-${pad(v.getMonth() + 1)}-${pad(v.getDate())}`
+  }
+  return String(v).slice(0, 10)
+}
+
 function classify (row) {
   const today = new Date().toISOString().slice(0, 10)
-  if (row.valid_from > today) return 'FUTURO'
-  if (row.valid_to && row.valid_to < today) return 'EXPIRADO'
+  const de  = ymd(row.valid_from)
+  const ate = ymd(row.valid_to)
+  if (de && de > today) return 'FUTURO'
+  if (ate && ate < today) return 'EXPIRADO'
   return 'VIGENTE'
 }
 
