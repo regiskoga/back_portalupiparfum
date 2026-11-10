@@ -25,13 +25,31 @@
  * lab de um lote com várias essências muda entre execuções e a vitrine fica
  * piscando entre laboratórios sem ninguém ter escrito nada.
  *
- * ATENÇÃO: envase SEM vínculo de lote não tem laboratório derivável e por isso
- * fica de FORA da conta (os ~1.552 importados por planilha, à espera de vínculo
- * manual). Excluir é a escolha conservadora: a vitrine anuncia menos do que
- * existe, em vez de criar um pseudo-lab que misturaria laboratórios — exatamente
- * o que a regra 1 existe para evitar. O total excluído volta no retorno para o
- * tamanho do problema ficar visível — em DOIS campos, porque são duas causas
- * diferentes de estoque que existe e a vitrine não mostra:
+ * ATENÇÃO: lote sem essência vinculada não tem laboratório derivável. Até
+ * 09/11/2026 ele ficava de FORA da conta, e o preço disso foi medido em produção:
+ * 76.686 ml — 68% de TODO o líquido do sistema — invisíveis em 437 lotes, com 396
+ * projetos publicados que não anunciavam nada. Desde 10/11/2026 esse líquido vai
+ * para o balde `SEM_LAB` e disputa a eleição normalmente.
+ *
+ * POR QUE ISSO NÃO QUEBRA A REGRA 1: o `SEM_LAB` é UM balde só, então não soma
+ * laboratórios diferentes num mesmo saldo — ele apenas admite que não se sabe qual
+ * é. Empate entre ele e um lab conhecido vai para o conhecido. Quanto do saldo
+ * publicado está nessa situação volta em `ml_sem_laboratorio`, e nesse caso
+ * `laboratorio_id` vem `null`.
+ *
+ * POR QUE NÃO FOI RECONSTRUÍDO O VÍNCULO em vez de mudar o código: medido em
+ * 09/11/2026, `batch_essences.quantity` é NOT NULL com CHECK > 0 e
+ * `formulas.essence_percentage` está preenchido em 1 projeto de 547 — não existe
+ * fonte para a quantidade. E das 135 linhas de `batch_essences` em produção, 134
+ * têm `quantity_available = quantity_purchased - consumido`, isto é, vincular
+ * essência DESCONTA saldo. Um backfill inventaria 437 quantidades numa tabela de
+ * estoque. Decisão do cliente em 10/11/2026: publicar com lab desconhecido vale
+ * mais do que esconder o líquido.
+ *
+ * Frasco SEM vínculo de lote continua de FORA: ali não se sabe nem de que líquido
+ * saiu, então é dívida de RASTREABILIDADE, não de laboratório (os ~1.552
+ * importados por planilha, à espera de vínculo manual). Os totais excluídos voltam
+ * no retorno para o tamanho do problema ficar visível:
  *   - `envases_sem_laboratorio`  = frasco sem vínculo de lote (o mutirão);
  *   - `unidades_de_outros_labs`  = frasco de um lab que perdeu a disputa.
  * O segundo é consequência normal da regra, o primeiro é dívida a quitar.
@@ -41,6 +59,10 @@ const { db } = require('../models/db')
 
 const STATUS_PRONTO    = 'Pronto para envase'
 const STATUS_MACERACAO = 'Em maceração'
+
+// Sentinela do balde "laboratório desconhecido". É string de propósito: não pode
+// colidir com nenhum `supplies.supplier_id`, que é inteiro.
+const SEM_LAB = 'sem-lab'
 
 const num = v => parseFloat(v) || 0
 
@@ -151,6 +173,7 @@ function vazio () {
     sob_encomenda: null,
     envases_sem_laboratorio: 0,
     unidades_de_outros_labs: 0,
+    ml_sem_laboratorio: 0,
     ml_comprometido: 0,
     ml_descontado_do_liquido: 0,
     itens_comprometidos_sem_volume: 0,
@@ -224,8 +247,18 @@ async function buildAvailability (productIds) {
   }
 
   for (const l of lotes) {
-    const lab = labDe[l.id]
-    if (lab === undefined) continue    // lote sem essência: sem lab, fica de fora
+    // Lote sem `batch_essences` não tem laboratório derivável. Até 09/11/2026 ele
+    // era DESCARTADO aqui, e isso escondia 76.686 ml — 68% de todo o líquido do
+    // sistema — em 437 lotes, dos quais 396 projetos não publicavam nada. Agora
+    // vai para um balde próprio e disputa a eleição como qualquer lab.
+    //
+    // POR QUE NÃO VIOLA A REGRA 1: o `SEM_LAB` continua sendo UM balde só, então
+    // não mistura laboratórios diferentes num mesmo saldo — ele admite que não
+    // sabemos qual é. Reconstruir o vínculo não era alternativa: `batch_essences`
+    // exige `quantity > 0` e `formulas.essence_percentage` está preenchido em 1
+    // projeto de 547, então um backfill inventaria 437 quantidades numa tabela que
+    // desconta estoque. Decisão do cliente em 10/11/2026: publicar vale mais.
+    const lab = labDe[l.id] === undefined ? SEM_LAB : labDe[l.id]
     if (l.status === STATUS_PRONTO) {
       bucket(l.product_id, lab).liquido_ml += num(l.remaining_ml)
     } else {
@@ -243,11 +276,17 @@ async function buildAvailability (productIds) {
 
   for (const f of frascos) {
     const loteId = lotePorFrasco[f.bottling_id]
-    const lab = loteId === undefined ? undefined : labDe[loteId]
-    if (lab === undefined) {
+    // DUAS causas diferentes, que antes caíam no mesmo balde de excluídos:
+    //   - frasco SEM vínculo de lote: não se sabe de que líquido saiu. Fica FORA,
+    //     como antes — é o mutirão dos ~1.552 importados por planilha, e é dívida
+    //     de RASTREABILIDADE, não só de laboratório.
+    //   - frasco cujo lote existe mas o lote não tem essência: é exatamente o caso
+    //     dos lotes acima, só falta o lab. Entra no balde `SEM_LAB`.
+    if (loteId === undefined) {
       garante(f.product_id).semLab += parseInt(f.quantity_available) || 0
       continue
     }
+    const lab = labDe[loteId] === undefined ? SEM_LAB : labDe[loteId]
     const b = bucket(f.product_id, lab)
     const v = num(f.volume_ml)
     b.prontos[v] = (b.prontos[v] || 0) + (parseInt(f.quantity_available) || 0)
@@ -279,7 +318,13 @@ async function buildAvailability (productIds) {
       const b = d.labs[k]
       const equivalente = b.liquido_ml +
         Object.entries(b.prontos).reduce((a, [v, q]) => a + num(v) * q, 0)
-      if (equivalente > melhor) { melhor = equivalente; vencedor = b }
+      // Empate vai para o laboratório CONHECIDO: na dúvida, publica o que é
+      // rastreável. Sem este desempate o vencedor de um empate sairia pela ordem
+      // de inserção dos baldes, que depende da ordem dos lotes na query — e um
+      // balde `SEM_LAB` empatado poderia tirar da vitrine frasco de lab real.
+      const ganha = equivalente > melhor ||
+        (equivalente === melhor && vencedor && vencedor.lab === SEM_LAB && b.lab !== SEM_LAB)
+      if (ganha) { melhor = equivalente; vencedor = b }
     }
 
     // Debita a reserva do vencedor: frasco pronto do mesmo volume primeiro, o
@@ -328,7 +373,9 @@ async function buildAvailability (productIds) {
     }
 
     saida[pid] = {
-      laboratorio_id: vencedor ? vencedor.lab : null,
+      // `null` aqui significa "não há vencedor" OU "o vencedor é o balde sem
+      // laboratório". Quem precisa distinguir olha `ml_sem_laboratorio`.
+      laboratorio_id: vencedor && vencedor.lab !== SEM_LAB ? vencedor.lab : null,
       liquido_ml:     vencedor ? vencedor.liquido_ml : 0,
       prontos: vencedor
         ? Object.entries(vencedor.prontos)
@@ -340,6 +387,9 @@ async function buildAvailability (productIds) {
         : null,
       envases_sem_laboratorio: d.semLab,
       unidades_de_outros_labs: perdedores,
+      // Quanto do `liquido_ml` publicado vem de lote sem laboratório derivável.
+      // > 0 significa: este saldo é real, mas o sistema não sabe de que lab é.
+      ml_sem_laboratorio: vencedor && vencedor.lab === SEM_LAB ? vencedor.liquido_ml : 0,
       // Vão no retorno para a reserva ser AUDITÁVEL. Sem isso, pedido antigo
       // parado em `Confirmed` sem vínculo some estoque da vitrine e ninguém
       // descobre por que — o relatório da loja mostra o número e dá o rastro.

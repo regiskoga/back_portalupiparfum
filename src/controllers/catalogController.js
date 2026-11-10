@@ -248,6 +248,9 @@ function montaDisponibilidade (disp, precos) {
     sob_encomenda:  disp.sob_encomenda,
     envases_sem_laboratorio: disp.envases_sem_laboratorio,
     unidades_de_outros_labs: disp.unidades_de_outros_labs,
+    // > 0 = este saldo e real, mas o sistema nao sabe de que laboratorio e
+    // (lote sem essencia vinculada). Ver catalogAvailability.
+    ml_sem_laboratorio: disp.ml_sem_laboratorio,
   }
 }
 
@@ -334,6 +337,10 @@ async function stock (req, res) {
         sob_encomenda:  d ? d.sob_encomenda : null,
         envases_sem_laboratorio: d ? d.envases_sem_laboratorio : 0,
         unidades_de_outros_labs: d ? d.unidades_de_outros_labs : 0,
+        // Parte do liquido_ml acima que vem de lote sem laboratorio derivavel.
+        // Vai no payload para o relatorio da loja mostrar quanto do anunciado
+        // esta sem rastro de lab, em vez de o numero so subir sem explicacao.
+        ml_sem_laboratorio: d ? d.ml_sem_laboratorio : 0,
         // Quanto do saldo ja tem dono (pedido em aberto sem envase vinculado).
         // Vai no payload para a reserva ser auditavel no relatorio da loja: sem
         // isso, pedido antigo parado em `Confirmed` esconde estoque e ninguem
