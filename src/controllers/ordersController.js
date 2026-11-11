@@ -235,7 +235,12 @@ exports.productionQueue = async (req, res) => {
         'order_items.id', 'order_items.order_id', 'order_items.product_id',
         'order_items.product_name', 'order_items.volume_ml',
         'order_items.quantity', 'order_items.unit_price',
-        'products.commercial_name', 'products.inspiration_brand', 'products.inspiration_name'
+        'products.commercial_name', 'products.inspiration_brand', 'products.inspiration_name',
+        // `order_items.product_name` acima e um INSTANTANEO gravado no pedido, e
+        // em 2.619 dos 3.654 envases ele guarda o nome COMERCIAL. A etiqueta pede
+        // o nome do PROJETO, entao ele vem explicito daqui — sem isto o Excel de
+        // etiquetas da Fila imprimia o comercial em 72% das linhas.
+        'products.project_name'
       )
 
     // Envases já vinculados por item (quanto do pedido já foi atendido)
