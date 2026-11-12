@@ -810,10 +810,22 @@ async function getOrdersConsumingBottling (req, res) {
     }
 
     // Vínculos via junction table (item normal — atual)
+    //
+    // O nome do perfume sai do PROJETO (`products.project_name`, resolvido pelo
+    // `order_items.product_id`), com o texto gravado no item apenas como fallback.
+    // `order_items.product_name` é um instantâneo da criação, e até 12/11/2026 a
+    // edição de item trocava o product_id sem reescrevê-lo (ver nota em
+    // ordersController.updateItem): este painel era o ÚNICO lugar que lia o texto
+    // cru, então mostrava o perfume antigo enquanto o resto do sistema — inclusive
+    // a Fila de Produção, que decide o que envasar — seguia o product_id. Foi assim
+    // que apareceu "envase de Dragon Tea no item Sole di Istanbul".
+    // O fallback existe para o pedido "leve" do drawer de Clientes, que não tem
+    // product_id. LEFT JOIN por chave primária: não multiplica linha.
     const fromJunction = await db('order_item_bottlings as oib')
       .join('order_items as oi', 'oi.id', 'oib.order_item_id')
       .join('orders as o', 'o.id', 'oi.order_id')
       .join('customers as c', 'c.id', 'o.customer_id')
+      .leftJoin('products as p', 'p.id', 'oi.product_id')
       .where('oib.bottling_id', bottlingId)
       .select(
         'o.id as order_id',
@@ -824,8 +836,8 @@ async function getOrdersConsumingBottling (req, res) {
         'c.name as customer_name',
         'c.phone as customer_phone',
         'oi.id as order_item_id',
-        'oi.product_name',
-        'oi.product_ref',
+        db.raw("COALESCE(NULLIF(p.project_name, ''), oi.product_name) as product_name"),
+        db.raw("COALESCE(NULLIF(p.sku, ''), oi.product_ref) as product_ref"),
         'oib.quantity as bottling_quantity',
         'oi.quantity as item_quantity',
         'oi.unit_price'
@@ -839,6 +851,7 @@ async function getOrdersConsumingBottling (req, res) {
       fromLegacy = await db('order_items as oi')
         .join('orders as o', 'o.id', 'oi.order_id')
         .join('customers as c', 'c.id', 'o.customer_id')
+        .leftJoin('products as p', 'p.id', 'oi.product_id') // nome pelo projeto — ver nota acima
         .where('oi.bottling_id', bottlingId)
         .whereNotExists(
           db('order_item_bottlings as oib')
@@ -854,8 +867,8 @@ async function getOrdersConsumingBottling (req, res) {
           'c.name as customer_name',
           'c.phone as customer_phone',
           'oi.id as order_item_id',
-          'oi.product_name',
-          'oi.product_ref',
+          db.raw("COALESCE(NULLIF(p.project_name, ''), oi.product_name) as product_name"),
+          db.raw("COALESCE(NULLIF(p.sku, ''), oi.product_ref) as product_ref"),
           'oi.quantity as bottling_quantity',
           'oi.quantity as item_quantity',
           'oi.unit_price'

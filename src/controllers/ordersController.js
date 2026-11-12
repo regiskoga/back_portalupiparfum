@@ -1091,6 +1091,31 @@ exports.updateItem = async (req, res) => {
       estimated_days: decision.estimatedDays,
       decision_notes: decision.notes,
     }
+
+    // `product_name`/`product_ref` são INSTANTÂNEOS do projeto, gravados na criação
+    // do item (a tela deriva os dois do product_id escolhido — vendas.js). Até
+    // 12/11/2026 este update movia só o product_id e deixava o texto antigo para
+    // sempre: trocar o perfume de um item já criado produzia item apontando para o
+    // projeto A com o nome do projeto B gravado. Em produção eram 12 itens assim.
+    //
+    // Divergência traiçoeira porque quase todas as telas resolvem o nome pelo JOIN
+    // (`products.project_name`, ver getById/productionQueue) e mostram o perfume
+    // certo — só o painel de pedidos do envase lia o texto cru e expunha o antigo.
+    // Pior: a Fila de Produção decide o que envasar pelo product_id, então o
+    // sistema produzia A enquanto aquele painel dizia B.
+    //
+    // Re-derivar aqui, no servidor, e não aceitar do payload: o PATCH da tela nem
+    // manda esses campos, e o único valor coerente é o do product_id que está sendo
+    // gravado. Projeto inexistente não zera o que já está lá (o isInt da rota já
+    // barra id inválido; isto é só blindagem).
+    const projeto = await db('products')
+      .where({ id: parseInt(product_id) })
+      .select('project_name', 'sku')
+      .first()
+    if (projeto) {
+      updateData.product_name = projeto.project_name || ''
+      updateData.product_ref  = projeto.sku || ''
+    }
     if (item_discount !== undefined) updateData.item_discount = parseFloat(item_discount) || 0
     // Embalagem: só sobrescreve quando o cliente manda o campo (undefined = não mexe)
     if (packaging_type_id !== undefined) {
