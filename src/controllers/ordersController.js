@@ -80,11 +80,39 @@ exports.getReadyBottlingsByProduct = getReadyBottlingsByProduct
  * só com pedido Pendente/Confirmado (pré-realização), por isso pode substituir.
  * Base = perfumes − desconto − cupom (SEM frete). @param conn trx ou db.
  */
+/**
+ * Status em que a comissão do parceiro NÃO existe (ainda) ou deixa de valer.
+ *
+ * `Pending` é pré-pedido: desde 13/11/2026, a pedido do cliente, a comissão só
+ * passa a contar quando o pedido é CONFIRMADO — antes disso ela inflava o saldo
+ * do parceiro com carrinho que podia nunca virar venda. Isto inverte a decisão
+ * original ("conta ao criar"), de forma consciente.
+ *
+ * Os três terminais negativos derrubam a comissão. `Lost` entrou junto em
+ * 13/11/2026: mercadoria perdida/avariada não virou venda, então também sai do
+ * saldo — antes só `Cancelled` e `Abandoned` estornavam, e a perda ficava
+ * pendurada no parceiro.
+ *
+ * ⚠️ NÃO confundir com o `NEG` do estoque, em updateStatus: lá `Lost` fica de
+ * fora de propósito (mercadoria perdida não volta para a prateleira). São duas
+ * listas porque são duas perguntas diferentes.
+ */
+const SEM_COMISSAO    = ['Pending']
+const COMISSAO_PERDIDA = ['Cancelled', 'Abandoned', 'Lost']
+
 async function syncOrderCommission (order, coupon, subtotal, couponDiscount, conn = db) {
   if (!coupon || !coupon.partner_id) {
     await conn('partner_commissions').where({ order_id: order.id }).del()
     return
   }
+
+  // Pedido ainda Pendente: nenhuma comissão. Apaga uma eventual linha anterior
+  // (pedido que regrediu de Confirmado para Pendente devolve o saldo).
+  if (SEM_COMISSAO.includes(order.status)) {
+    await conn('partner_commissions').where({ order_id: order.id }).del()
+    return
+  }
+
   const partner = await conn('partners').where({ id: coupon.partner_id }).first()
   const rate = coupon.commission_rate != null
     ? Number(coupon.commission_rate)
@@ -97,7 +125,19 @@ async function syncOrderCommission (order, coupon, subtotal, couponDiscount, con
     return
   }
 
-  const competence = new Date(order.created_at).toISOString().slice(0, 7) // YYYY-MM
+  const existente = await conn('partner_commissions').where({ order_id: order.id }).first()
+
+  // Competência = mês em que a comissão NASCEU, ou seja, o da confirmação do
+  // pedido (decisão de 13/11/2026). Uma vez gravada, nunca se move: editar item
+  // em dezembro não pode empurrar para dezembro a comissão de um pedido
+  // confirmado em novembro, senão o fechamento do mês passado muda sozinho.
+  const competence = existente?.competence || new Date().toISOString().slice(0, 7) // YYYY-MM
+
+  // Pedido já cancelado/perdido mantém a linha ESTORNADA. Sem isto, qualquer
+  // recálculo (edição de item em pedido antigo, troca de cupom) ressuscitaria a
+  // comissão de um pedido que não é mais venda.
+  const estornado = COMISSAO_PERDIDA.includes(order.status) || existente?.status === 'estornado'
+
   await conn('partner_commissions')
     .insert({
       partner_id: coupon.partner_id,
@@ -106,14 +146,16 @@ async function syncOrderCommission (order, coupon, subtotal, couponDiscount, con
       base_amount: base,
       rate,
       amount,
-      status: 'aprovado',
+      status: estornado ? 'estornado' : 'aprovado',
       competence,
-      reversed_at: null,
-      reversal_reason: null,
+      reversed_at: estornado ? (existente?.reversed_at || conn.fn.now()) : null,
+      reversal_reason: estornado ? (existente?.reversal_reason || 'Pedido sem venda') : null,
       updated_at: conn.fn.now(),
     })
     .onConflict('order_id')
-    .merge()
+    // `competence` fica FORA do merge de propósito: ela é do nascimento da linha.
+    .merge(['partner_id', 'coupon_id', 'base_amount', 'rate', 'amount',
+            'status', 'reversed_at', 'reversal_reason', 'updated_at'])
 }
 
 /**
@@ -204,6 +246,59 @@ async function ajustaDescontoDoItem (orderId, delta, conn = db) {
 /** Quanto aquele item representa hoje dentro do desconto do pedido. */
 const descontoDoItem = item =>
   (parseFloat(item?.item_discount) || 0) * (parseInt(item?.quantity) || 0)
+
+/**
+ * Mantém o desconto do Pix dentro do desconto do pedido.
+ *
+ * Mesma mecânica do `ajustaDescontoDoItem` acima, e pelo mesmo motivo: o total
+ * autoritativo é Σ(preço × qtd) − discount − cupom + frete, e existem SEIS
+ * cópias dessa fórmula no sistema (reports topCustomers e balancete, vendas.js
+ * em quatro pontos, pedidos-antigos.js). Somar uma parcela nova obrigaria a
+ * acertar todas; entrando por dentro do `discount`, nenhuma muda — e a base da
+ * comissão do parceiro (perfumes − desconto − cupom) já cai sozinha, que é a
+ * regra decidida com o cliente em 12/11/2026.
+ *
+ * `orders.pix_discount` guarda só QUANTO do desconto é Pix, para o resumo
+ * conseguir escrever a linha discriminada. Quem somar essa coluna no total
+ * conta duas vezes.
+ *
+ * Idempotente e auto-corretivo: recalcula o alvo e move o `discount` pelo
+ * DELTA contra o que já estava gravado. Pode ser chamado quantas vezes quiser,
+ * em qualquer ordem, inclusive quando nada mudou.
+ *
+ * Sempre ANTES de `recalcOrderCommission` — a base da comissão lê o `discount`
+ * já gravado.
+ */
+async function ajustaDescontoPix (orderId, conn = db) {
+  const order = await conn('orders').where({ id: orderId }).first()
+  if (!order) return
+
+  const par = await conn('parameters').where({ key: 'pix_discount_pct' }).first()
+  const pct = Math.max(0, parseFloat(par?.value || 0) || 0)
+
+  const items = await conn('order_items').where({ order_id: orderId })
+  const subtotal = items.reduce(
+    (s, i) => s + parseFloat(i.unit_price || 0) * parseInt(i.quantity || 0), 0)
+
+  // Só o Pix desconta. Qualquer outra forma (ou nenhuma) zera a parcela — é o
+  // que faz trocar Pix → Cartão devolver o desconto sozinho.
+  const ehPix = String(order.payment_method || '').trim().toLowerCase() === 'pix'
+  const alvo  = ehPix && pct > 0
+    ? Math.round(subtotal * pct) / 100
+    : 0
+
+  const atual = parseFloat(order.pix_discount || 0)
+  const delta = Math.round((alvo - atual) * 100) / 100
+  if (delta === 0) return
+
+  const novoDesconto = Math.max(0, Math.round((parseFloat(order.discount || 0) + delta) * 100) / 100)
+  await conn('orders').where({ id: orderId }).update({
+    discount: novoDesconto,
+    pix_discount: alvo,
+    updated_at: conn.fn.now(),
+  })
+}
+exports.ajustaDescontoPix = ajustaDescontoPix
 
 /**
  * ③ Fila de produção: pedidos CONFIRMADOS (aguardando) e EM PRODUÇÃO (em
@@ -492,7 +587,11 @@ exports.create = async (req, res) => {
       freight_type = null,
       notes = '',
       channel = '',
-      coupon_code = null
+      coupon_code = null,
+      // Forma de pagamento já na criação: é ela que liga o desconto do Pix, e o
+      // resumo para o comprador sai logo depois de criar o pedido. Opcional —
+      // pedido sem forma definida continua funcionando como sempre.
+      payment_method = null
     } = req.body
 
     // Validações básicas
@@ -539,7 +638,8 @@ exports.create = async (req, res) => {
         shipping,
         freight_type: freight_type ? String(freight_type).trim() : null,
         notes,
-        coupon_id: coupon?.id || null
+        coupon_id: coupon?.id || null,
+        payment_method: payment_method ? String(payment_method).trim() : null
       })
       .returning('*')
 
@@ -650,6 +750,12 @@ exports.create = async (req, res) => {
         estimated_delivery: deadline.estimatedDelivery,
         coupon_discount: couponDiscount
       })
+
+    // Desconto do Pix: só tem efeito se a tela mandou `payment_method: 'Pix'` e
+    // o parâmetro estiver acima de zero. Depois do update acima porque ele lê o
+    // pedido gravado, e o pedido nasce Pendente — então nenhuma comissão é
+    // criada aqui (ela só passa a existir na confirmação).
+    await ajustaDescontoPix(order.id, trx)
 
     await activityLogger.log('order_created', 'order', order.id, {
       description: `Pedido ${order.code} criado com ${processedItems.length} item(ns)`,
@@ -856,27 +962,49 @@ exports.updateStatus = async (req, res) => {
           }
         }
 
-        // ── Comissão de parceiro (Fase 2): estorna ao cancelar, reverte ao reabrir.
-        //    Gateado pela transição + filtro de status = idempotente num re-cancel.
-        if (enteringCancelled) {
-          await trx('partner_commissions').where({ order_id: id, status: 'aprovado' }).update({
-            status: 'estornado',
-            reversed_at: trx.fn.now(),
-            reversal_reason: (cancellation_reason || 'Pedido cancelado').trim(),
-            updated_at: trx.fn.now(),
-          })
-        } else {
-          await trx('partner_commissions').where({ order_id: id, status: 'estornado' }).update({
-            status: 'aprovado',
-            reversed_at: null,
-            reversal_reason: null,
-            updated_at: trx.fn.now(),
-          })
-        }
+      }
+
+      // ── Comissão de parceiro ────────────────────────────────────────────
+      // Bloco PRÓPRIO, separado do estoque acima de propósito: as duas regras
+      // discordam sobre `Lost`. Mercadoria perdida não volta para a prateleira
+      // (fica fora do NEG do estoque), mas também não é venda — então estorna a
+      // comissão. Juntar as duas listas quebraria uma das duas regras.
+      //
+      // Gateado pela TRANSIÇÃO, como o resto: idempotente num re-cancel.
+      const entrandoSemVenda = COMISSAO_PERDIDA.includes(status) && !COMISSAO_PERDIDA.includes(order.status)
+      const saindoParaVenda  = COMISSAO_PERDIDA.includes(order.status) && !COMISSAO_PERDIDA.includes(status)
+
+      if (entrandoSemVenda) {
+        const motivoPadrao = status === 'Lost' ? 'Pedido perdido/avariado' : 'Pedido cancelado'
+        await trx('partner_commissions').where({ order_id: id, status: 'aprovado' }).update({
+          status: 'estornado',
+          reversed_at: trx.fn.now(),
+          reversal_reason: ((status === 'Lost' ? loss_reason : cancellation_reason) || motivoPadrao).trim(),
+          updated_at: trx.fn.now(),
+        })
+      } else if (saindoParaVenda && !SEM_COMISSAO.includes(status)) {
+        // Reabriu para um status vivo: a comissão volta a valer.
+        await trx('partner_commissions').where({ order_id: id, status: 'estornado' }).update({
+          status: 'aprovado',
+          reversed_at: null,
+          reversal_reason: null,
+          updated_at: trx.fn.now(),
+        })
       }
 
       return trx('orders').where({ id }).update(updateData).returning('*')
     })
+
+    // ── Nascimento e morte da comissão por confirmação (13/11/2026) ────────
+    // A comissão agora só existe a partir de Confirmado, então é a TRANSIÇÃO de
+    // Pendente que a cria — e a volta para Pendente que a apaga. Fora da
+    // transação acima porque `recalcOrderCommission` abre a sua própria leitura
+    // do pedido, e aqui ele já está com o status novo gravado.
+    const saiuDePendente   = order.status === 'Pending' && status !== 'Pending'
+    const voltouAPendente  = order.status !== 'Pending' && status === 'Pending'
+    if (saiuDePendente || voltouAPendente) {
+      await recalcOrderCommission(parseInt(id))
+    }
 
     await activityLogger.log('order_updated', 'order', id, {
       description: `Status do pedido alterado para: ${status}`,
@@ -1130,6 +1258,8 @@ exports.updateItem = async (req, res) => {
     // O Desc./item abate do total pelo `orders.discount`, então editar o item
     // (desconto OU quantidade) precisa mover o discount pelo mesmo delta.
     await ajustaDescontoDoItem(orderId, descontoDoItem(updated) - descontoDoItem(item))
+    // O desconto do Pix é % do subtotal, então mexer no item o move junto.
+    await ajustaDescontoPix(orderId)
 
     // GAP G2: editar item muda o subtotal → recalcula cupom + comissão do parceiro.
     await recalcOrderCommission(orderId)
@@ -1321,11 +1451,63 @@ exports.registerPayment = async (req, res) => {
       })
       .returning('*')
 
+    // Trocar a forma de pagamento aqui também mexe no desconto do Pix (o
+    // registro do pagamento é um dos caminhos que define `payment_method`).
+    await ajustaDescontoPix(parseInt(id))
+    await recalcOrderCommission(parseInt(id))
+
     await activityLogger.log('order_updated', 'order', id, {
       description: `Pagamento registrado: ${payment_method} — ${amount_paid}`,
     })
 
-    res.json(updated)
+    res.json(await db('orders').where({ id }).first())
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+}
+
+/**
+ * Define SÓ a forma de pagamento, sem registrar valor nem data.
+ *
+ * Existe porque o resumo que vai para o comprador precisa sair com o desconto
+ * do Pix já aplicado, e isso acontece ANTES de ele pagar — pedido do cliente em
+ * 12/11/2026: "na hora de registrar o pedido aparece a opção do pagamento, mas
+ * precisamos que apareça antes de registrar o pagto, para gerar o resumo
+ * correto". O `registerPayment` não serve para isso: ele grava valor pago e
+ * data, ou seja, afirma que o dinheiro entrou.
+ *
+ * Liberado em qualquer fase antes de concluída, como o frete: combinar a forma
+ * de pagamento é conversa de venda, não de produção. `null` limpa a escolha (e
+ * devolve o desconto do Pix).
+ */
+exports.updatePaymentMethod = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { payment_method } = req.body
+
+    const order = await db('orders').where({ id }).first()
+    if (!order) return res.status(404).json({ error: 'Order not found' })
+    if (['Delivered', 'Cancelled'].includes(order.status)) {
+      return res.status(400).json({ error: 'Pedido concluído: forma de pagamento não pode mais ser alterada' })
+    }
+
+    const metodo = payment_method ? String(payment_method).trim() : null
+    await db('orders').where({ id }).update({
+      payment_method: metodo,
+      updated_at: db.fn.now(),
+    })
+
+    // Ordem obrigatória: o Pix mexe no `discount`, e a base da comissão lê o
+    // `discount` já gravado.
+    await ajustaDescontoPix(parseInt(id))
+    await recalcOrderCommission(parseInt(id))
+
+    await activityLogger.log('order_updated', 'order', id, {
+      description: `Forma de pagamento definida: ${metodo || '(nenhuma)'}`,
+    })
+
+    events.broadcast('orders-changed', { id: parseInt(id), action: 'payment-method' })
+    res.json(await db('orders').where({ id }).first())
   } catch (error) {
     res.status(500).json({ error: error.message })
   }
@@ -1564,6 +1746,7 @@ exports.addItem = async (req, res) => {
     // Item novo com Desc./item entra também no desconto do pedido (ver
     // ajustaDescontoDoItem) — senão o desconto digitado aqui não abateria nada.
     await ajustaDescontoDoItem(order.id, descontoDoItem(orderItem), trx)
+    await ajustaDescontoPix(order.id, trx) // % do subtotal: item novo move o Pix
 
     await recalcOrderCommission(order.id, trx)
 
@@ -1618,6 +1801,7 @@ exports.removeItem = async (req, res) => {
     // Devolve ao total o Desc./item que saiu junto com o item: sem isto o pedido
     // continuaria descontando um item que não existe mais.
     await ajustaDescontoDoItem(order.id, -descontoDoItem(item), trx)
+    await ajustaDescontoPix(order.id, trx) // % do subtotal: item a menos move o Pix
 
     await recalcOrderCommission(order.id, trx)
 

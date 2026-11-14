@@ -240,6 +240,21 @@ router.patch(
 )
 
 /**
+ * PATCH /api/orders/:id/payment-method
+ * Define SÓ a forma de pagamento (sem valor nem data), para o resumo do cliente
+ * sair já com o desconto do Pix. Ver updatePaymentMethod no controller.
+ */
+router.patch(
+  '/:id/payment-method',
+  [
+    param('id').isInt(),
+    body('payment_method').optional({ nullable: true }).isString(),
+  ],
+  validate,
+  ordersController.updatePaymentMethod
+)
+
+/**
  * PATCH /api/orders/:id/notes
  * Edita os comentários/observações do pedido (qualquer fase)
  */

@@ -227,18 +227,29 @@ async function statement (req, res) {
     const balance = await computeBalance(id)
 
     // Linhas do extrato (do mês, se filtrado) com pedido e cupom
+    // `customer_name` entra para o parceiro conferir a quem foi a venda —
+    // pedido do cliente em 12/11/2026. A tela mostra só o PRIMEIRO nome (é
+    // controle, não cadastro), mas o nome completo vem daqui porque o Excel do
+    // extrato aproveita o mesmo payload.
     let q = db('partner_commissions as pc')
       .leftJoin('orders as o', 'o.id', 'pc.order_id')
       .leftJoin('coupons as c', 'c.id', 'pc.coupon_id')
+      .leftJoin('customers as cu', 'cu.id', 'o.customer_id')
       .where('pc.partner_id', id)
       .select(
         'pc.id', 'pc.order_id', 'pc.base_amount', 'pc.rate', 'pc.amount',
         'pc.status', 'pc.competence', 'pc.created_at', 'pc.reversal_reason',
         'o.code as order_code', 'o.status as order_status',
+        'cu.name as customer_name',
         'c.code as coupon_code'
       )
       .orderBy('pc.created_at', 'desc')
     if (month) q = q.where('pc.competence', month)
+    // Filtro por status do pedido (item 4): aceita vários separados por vírgula.
+    if (req.query.order_status) {
+      const alvo = String(req.query.order_status).split(',').map(s => s.trim()).filter(Boolean)
+      if (alvo.length) q = q.whereIn('o.status', alvo)
+    }
     const items = await q
 
     // Resgates (débitos) do mesmo período, com os itens de mercadoria
