@@ -160,21 +160,43 @@ async function syncOrderCommission (order, coupon, subtotal, couponDiscount, con
 
 /**
  * Calcula o desconto de um cupom sobre uma lista de itens do pedido.
- * Extraído do fluxo de create/applyCoupon para ser reusado ao editar itens
- * (o desconto de cupons percentuais/progressivos depende do subtotal).
+ *
+ * ── CASCATA (14/11/2026, pedido do cliente) ───────────────────────────────
+ * O cupom percentual incide sobre o subtotal JÁ DESCONTADO, não sobre o cheio.
+ * O anúncio é "5% no Pix + 3% no cupom": aplica-se o Pix primeiro e os 3% sobre
+ * o valor que sobrou — é assim que o varejo acumula desconto, e é o que o dono
+ * comunica ao comprador.
+ *
+ * Em R$ 200: antes 5% + 3% = R$ 16,00 (8% cheios); agora 10,00 + 3% de 190,00 =
+ * R$ 15,70. A diferença é a favor da loja e é o comportamento combinado.
+ *
+ * `descontosAntes` é o `orders.discount` já gravado, que carrega TUDO que veio
+ * antes: o desconto do Pix, o desconto por volume, o Desc./item e o que o dono
+ * digitou à mão. Por isso o Pix precisa ser aplicado ANTES desta conta — ver a
+ * ordem em create() e em recalcOrderCommission().
+ *
+ * Só os tipos PERCENTUAIS entram na cascata. `Fixed Amount` é um valor em reais
+ * (não há sobre o que incidir) e `Buy X Get Y` dá itens grátis, cujo valor não
+ * muda porque houve desconto antes.
+ *
  * NÃO valida min_order_value nem incrementa uso — isso fica em applyCoupon/create.
  */
-function computeCouponDiscount (coupon, items) {
+function computeCouponDiscount (coupon, items, descontosAntes = 0) {
   const subtotal = items.reduce((s, i) => s + parseFloat(i.unit_price || 0) * parseInt(i.quantity || 0), 0)
+  // Base da cascata: nunca negativa, nunca maior que o subtotal.
+  const base = Math.max(0, subtotal - Math.max(0, Number(descontosAntes) || 0))
   const minOrderValue = parseFloat(coupon.min_order_value || 0)
   switch (coupon.type) {
     case 'Percentage':
-      return (subtotal * coupon.discount_value) / 100
+      return (base * coupon.discount_value) / 100
     case 'Fixed Amount':
       return parseFloat(coupon.discount_value)
     case 'Progressive': {
+      // O mínimo do cupom continua medido no subtotal CHEIO (é a régua de
+      // "pedido grande o bastante"); só o percentual incide sobre a base.
       const excessAmount = Math.max(0, subtotal - minOrderValue)
-      return (excessAmount * coupon.discount_value) / 100
+      const excessoNaBase = Math.min(excessAmount, base)
+      return (excessoNaBase * coupon.discount_value) / 100
     }
     case 'Buy X Get Y': {
       const totalQty = items.reduce((s, i) => s + parseInt(i.quantity || 0), 0)
@@ -207,7 +229,10 @@ async function recalcOrderCommission (orderId, conn = db) {
   if (order.coupon_id) {
     coupon = await conn('coupons').where({ id: order.coupon_id }).first()
     if (coupon) {
-      couponDiscount = computeCouponDiscount(coupon, items)
+      // Cascata: o cupom incide sobre o subtotal menos o `discount` já gravado
+      // (Pix + volume + Desc./item + manual). Todo chamador roda
+      // `ajustaDescontoPix` ANTES deste recálculo, então o Pix já está aqui.
+      couponDiscount = computeCouponDiscount(coupon, items, order.discount)
       await conn('orders').where({ id: orderId })
         .update({ coupon_discount: couponDiscount, updated_at: conn.fn.now() })
     }
@@ -706,30 +731,19 @@ exports.create = async (req, res) => {
         return res.status(400).json({ error: `Valor mínimo do pedido para este cupom: R$ ${minOrderValue.toFixed(2)}` })
       }
 
-      switch (coupon.type) {
-        case 'Percentage':
-          couponDiscount = (subtotal * coupon.discount_value) / 100
-          break
-        case 'Fixed Amount':
-          couponDiscount = parseFloat(coupon.discount_value)
-          break
-        case 'Progressive': {
-          // Aplica desconto somente sobre a parte que excede o valor mínimo
-          const excessAmount = Math.max(0, subtotal - minOrderValue)
-          couponDiscount = (excessAmount * coupon.discount_value) / 100
-          break
-        }
-        case 'Buy X Get Y': {
-          // Implementar lógica de "leve X pague Y"
-          const totalItems = processedItems.reduce((sum, item) => sum + item.quantity, 0)
-          if (totalItems >= coupon.min_items) {
-            const freeItems = Math.floor(totalItems / coupon.min_items) * coupon.free_items
-            const avgPrice = subtotal / totalItems
-            couponDiscount = freeItems * avgPrice
-          }
-          break
-        }
-      }
+      // ⚠️ ORDEM: o desconto do Pix entra ANTES do cupom, porque o cupom é
+      // calculado em cascata sobre o que sobrou (ver computeCouponDiscount).
+      // Era aqui que o pedido NOVO discordava do pedido EDITADO: este bloco
+      // tinha uma cópia própria da conta do cupom, enquanto edição e applyCoupon
+      // usavam o helper. Agora os três passam pelo mesmo lugar.
+      await ajustaDescontoPix(order.id, trx)
+      const pedidoComPix = await trx('orders').where({ id: order.id }).first()
+
+      couponDiscount = computeCouponDiscount(
+        coupon,
+        processedItems,
+        pedidoComPix?.discount ?? discount
+      )
 
       // Atualizar uso do cupom
       await trx('coupons')
@@ -752,9 +766,13 @@ exports.create = async (req, res) => {
       })
 
     // Desconto do Pix: só tem efeito se a tela mandou `payment_method: 'Pix'` e
-    // o parâmetro estiver acima de zero. Depois do update acima porque ele lê o
-    // pedido gravado, e o pedido nasce Pendente — então nenhuma comissão é
-    // criada aqui (ela só passa a existir na confirmação).
+    // o parâmetro estiver acima de zero. O pedido nasce Pendente, então nenhuma
+    // comissão é criada aqui (ela só passa a existir na confirmação).
+    //
+    // Chamado de novo aqui de propósito: no caminho COM cupom ele já rodou lá
+    // em cima (o cupom precisa enxergar o Pix para a cascata), e aqui vira
+    // no-op porque é idempotente — move o `discount` pelo delta, que já é zero.
+    // Sem cupom, esta é a única chamada.
     await ajustaDescontoPix(order.id, trx)
 
     await activityLogger.log('order_created', 'order', order.id, {
@@ -1559,7 +1577,10 @@ exports.applyCoupon = async (req, res) => {
       return res.status(400).json({ error: `Valor mínimo do pedido para este cupom: R$ ${minOrderValue.toFixed(2)}` })
     }
 
-    const couponDiscount = computeCouponDiscount(coupon, items)
+    // Cascata: incide sobre o subtotal menos o `discount` já gravado (Pix,
+    // volume, Desc./item, manual). `order` foi lido no topo desta função, antes
+    // de qualquer escrita aqui, então o discount dele é o valor corrente.
+    const couponDiscount = computeCouponDiscount(coupon, items, order.discount)
 
     const [updated] = await db('orders').where({ id })
       .update({ coupon_id: coupon.id, coupon_discount: couponDiscount, updated_at: db.fn.now() })
