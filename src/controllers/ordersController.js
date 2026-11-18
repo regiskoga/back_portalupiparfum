@@ -325,6 +325,14 @@ async function ajustaDescontoPix (orderId, conn = db) {
 }
 exports.ajustaDescontoPix = ajustaDescontoPix
 
+// Reaproveitados pelo pedido pago que vem da loja WordPress
+// (`catalogController.storeOrder`). São exportados DE PROPÓSITO em vez de
+// copiados: já houve uma divergência quando `create()` tinha a sua própria
+// cópia da conta do cupom — pedido novo e pedido editado davam totais
+// diferentes. Quem calcular cupom ou comissão passa por aqui.
+exports.computeCouponDiscount = computeCouponDiscount
+exports.syncOrderCommission   = syncOrderCommission
+
 /**
  * ③ Fila de produção: pedidos CONFIRMADOS (aguardando) e EM PRODUÇÃO (em
  * andamento), do mais antigo ao mais recente, já com seus itens (perfumes) e o

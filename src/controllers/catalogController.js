@@ -1,6 +1,11 @@
 const { db } = require('../models/db')
 const { buildAvailability, opcoesPorVolume, validarCarrinho } = require('../services/catalogAvailability')
 const { montarPrecosDoSite } = require('../services/precosSite')
+// Conta do cupom e crédito da comissão do parceiro: as MESMAS funções do pedido
+// digitado à mão. Copiar a fórmula para cá faria o pedido do site divergir do
+// pedido da tela na primeira mudança de regra — já aconteceu uma vez.
+// `ordersController` não requer este módulo, então não há ciclo.
+const { computeCouponDiscount, syncOrderCommission } = require('./ordersController')
 
 async function list(req, res) {
   try {
@@ -508,11 +513,46 @@ function soDigitos (v) { return String(v || '').replace(/\D/g, '') }
  *   "total_pago":    350.00,            // opcional
  *   "frete":         25.00,
  *   "desconto":      0,
+ *   "cupons":        ["MILENA"],        // ver CONTRATO abaixo
+ *   "desconto_cupom": 12.50,            // só usado se o cupom nao existir aqui
+ *   "desconto_pix":   3.92,             // fee negativa de Pix da loja
  *   "cliente": { "nome", "telefone", "email", "cpf", "cep", "rua", "numero",
  *                "complemento", "bairro", "cidade", "estado" },
  *   "itens": [ { "sku", "volume_ml", "quantidade", "preco_unitario" } ],
  *   "observacoes": "..."
  * }
+ *
+ * ── CONTRATO DO PREÇO (plugin >= 0.4.0) ───────────────────────────────────
+ * A chave `cupons` é o MARCADOR DE VERSÃO do payload, não só um dado:
+ *
+ *   presente  → cupons são resolvidos, viram `coupon_id` + comissão, e o
+ *               `desconto_cupom`/`desconto_pix` entram em colunas próprias.
+ *   ausente   → nenhum cupom é aplicado e nenhuma comissão nasce. O que vier
+ *               em `desconto` é o abatimento TOTAL do pedido e é gravado como
+ *               está. Comportamento inalterado.
+ *
+ * A invariante que faz o total fechar NÃO é "o preço é bruto" ou "é líquido" —
+ * é `Σ(preço × qtd) − desconto − cupom + frete == total_pago`. O plugin
+ * garante isso derivando o desconto por diferença. Por isso o plugin VIVO de
+ * 17/11/2026, que manda preço bruto com o desconto todo num campo só e sem a
+ * chave `cupons`, fecha o total certo aqui mesmo sem creditar comissão — é o
+ * estado intermediário entre os dois deploys, e o CT12 de
+ * `scripts/teste-cupom-loja.js` o cobre.
+ *
+ * ⚠️ O plugin manda `cupons` MESMO VAZIO, e tem de continuar mandando: num
+ * pedido sem cupom bruto e líquido são o mesmo número, então a lista vazia não
+ * diz nada — quem diz em que contrato estamos é a PRESENÇA da chave. Não
+ * "otimize" removendo-a quando não há cupom.
+ *
+ * ⚠️ ORDEM DE DEPLOY: backend primeiro, plugin depois. Backend novo + plugin
+ * velho é inócuo (não vem `cupons`). Plugin novo + backend velho grava preço
+ * bruto como se fosse líquido: todo pedido do site entra inflado, sem desconto.
+ *
+ * Por que recalcular em vez de aceitar o desconto que a loja mandou: qualquer
+ * edição de item no pedido dispara `recalcOrderCommission`, que recalcula o
+ * cupom do zero a partir de `coupon_id`. Gravar o valor da loja com um
+ * `coupon_id` ao lado fica certo na criação e ERRADO na primeira edição — o
+ * desconto incidiria de novo sobre um subtotal já líquido.
  */
 async function storeOrder (req, res) {
   try {
@@ -562,6 +602,45 @@ async function storeOrder (req, res) {
     // de a sincronização esconder a ficha. A venda existe e tem de ser
     // registrada; o desvio sai no aviso.
     const inativos = skus.filter(s => !porSku[s][0].active || !porSku[s][0].catalog_status)
+
+    // ── Cupom da loja → comissão do parceiro ────────────────────────────────
+    // Resolvido FORA da transação (só leitura, e um código que não existe não
+    // pode derrubar um pedido que já foi pago).
+    const contratoDeCupom = Object.prototype.hasOwnProperty.call(b, 'cupons')
+    const codigos = [...new Set(
+      (Array.isArray(b.cupons) ? b.cupons : [])
+        .map(c => String(c || '').trim().toUpperCase())
+        .filter(Boolean)
+    )]
+
+    let cupomAplicado = null
+    let cuponsNaoEncontrados = []
+    let cuponsIgnorados = []
+
+    if (contratoDeCupom && codigos.length) {
+      // O Woo guarda o código como o lojista digitou (costuma vir minúsculo) e
+      // aqui o cadastro é maiúsculo, então os dois lados são normalizados: a
+      // lista já chega em maiúsculas (acima) e a coluna passa por UPPER/TRIM.
+      // Conferido contra o banco real — ver `scripts/ler-cupons-parceiros.js`,
+      // que guarda o teste.
+      const achados = await db('coupons').whereIn(db.raw('UPPER(TRIM(code))'), codigos)
+      const porCodigo = new Map(achados.map(c => [String(c.code).trim().toUpperCase(), c]))
+
+      cuponsNaoEncontrados = codigos.filter(c => !porCodigo.has(c))
+      const resolvidos = codigos.map(c => porCodigo.get(c)).filter(Boolean)
+
+      // O Woo deixa empilhar cupons; aqui é UM por pedido — `coupons.partner_id`
+      // é 1:N e `partner_commissions` tem UNIQUE(order_id), de propósito, para a
+      // comissão nunca ficar ambígua. Vence o primeiro COM parceiro (é ele que
+      // vale dinheiro para alguém); não havendo nenhum, o primeiro resolvido,
+      // que ao menos abate o desconto certo.
+      cupomAplicado = resolvidos.find(c => c.partner_id) || resolvidos[0] || null
+      cuponsIgnorados = resolvidos.filter(c => c.id !== (cupomAplicado && cupomAplicado.id))
+        .map(c => c.code)
+
+      // Cupom inativo NÃO barra: ele foi usado e cobrado na loja; recusar aqui
+      // perderia a venda. O desvio sai na nota.
+    }
 
     const resultado = await db.transaction(async trx => {
       // IDEMPOTÊNCIA. `orders.code` é `text` SEM índice único (migration
@@ -619,10 +698,109 @@ async function storeOrder (req, res) {
         }
       }
 
+      // PREÇO VEM DA REQUISIÇÃO, e isto é o certo: quem cobrou foi a loja, e o
+      // valor cobrado é o que ela diz. Buscar em `price_lists` aqui faria o
+      // pedido divergir da cobrança sempre que a tabela mudasse entre a venda e
+      // o webhook, ou sempre que houver promoção no site. É seguro porque o
+      // endpoint está atrás do segredo de sincronização, servidor-a-servidor.
+      // Não "corrija" isto resolvendo o preço no servidor.
+      //
+      // O que o CUPOM muda: com o contrato novo o preço chega bruto e o
+      // desconto é calculado aqui (ver o cabeçalho da função). Sem o contrato,
+      // o preço já vem líquido e nada é descontado — como sempre foi.
+      const linhas = itensBody
+        .map(i => {
+          const p = porSku[String(i.sku || '').trim()]
+          if (!p) return null
+          const qtd = parseFloat(i.quantidade) || 0
+          if (qtd <= 0) return null
+          return {
+            product_id:    p[0].id,
+            product_name:  p[0].project_name,
+            product_ref:   p[0].sku || '',
+            volume_ml:     parseFloat(i.volume_ml) || 0,
+            quantity:      qtd,
+            unit_price:    Math.max(0, parseFloat(i.preco_unitario) || 0),
+            item_discount: 0,
+          }
+        })
+        .filter(Boolean)
+
+      if (!linhas.length) throw new Error('Nenhum item valido apos a validacao')
+
+      const subtotal = linhas.reduce((s, i) => s + i.unit_price * i.quantity, 0)
+      const frete    = Math.max(0, parseFloat(b.frete) || 0)
+
+      let desconto       = Math.max(0, parseFloat(b.desconto) || 0)
+      let couponDiscount = 0
+
+      // DESCONTO PIX DA LOJA. A loja aplica os 3% como uma FEE NEGATIVA
+      // ("Desconto no Pix (3%)"), que não aparece em `get_discount_total()`
+      // nem no preço da linha — medido nos pedidos #3433 e #3437 de
+      // 17/11/2026, que entraram com o total R$ 3,92 e R$ 6,54 maior do que
+      // o cliente pagou. Vem em `desconto_pix` e entra por dentro do
+      // `discount`, como o Pix do sistema (ver `ajustaDescontoPix`).
+      //
+      // ⚠️ É o valor da LOJA, não recalculado: lá os 3% incidem sobre o
+      // subtotal JÁ com cupom, aqui o Pix vem antes do cupom. Recalcular daria
+      // alguns centavos de diferença contra o que foi cobrado — e o que vale é
+      // a cobrança.
+      const pixDaLoja = Math.max(0, parseFloat(b.desconto_pix) || 0)
+      desconto = Math.round((desconto + pixDaLoja) * 100) / 100
+
+      if (cupomAplicado) {
+        // ⚠️ VALE O VALOR DA LOJA, não o nosso recálculo. A loja aplica
+        // cupom→Pix; o sistema aplica Pix→cupom (cascata de 14/11/2026). Em
+        // #3433 e #3437 o recálculo dá R$ 0,19 e R$ 0,32 MENOS de desconto, ou
+        // seja, um total maior do que o cliente efetivamente pagou — e quem
+        // cobrou foi a loja. Medido contra o Woo real.
+        //
+        // `desconto_cupom` é o `get_discount_total()` do Woo, que é só cupom
+        // (a fee de Pix não entra nele — ver `desconto_pix`). Então usar o
+        // valor dele aqui não duplica nada.
+        //
+        // O recálculo fica como PISO para o caso de a loja não mandar o valor
+        // (pedido antigo reenviado, ou cupom aplicado fora do checkout).
+        const daLoja = parseFloat(b.desconto_cupom)
+        couponDiscount = Number.isFinite(daLoja) && daLoja > 0
+          ? Math.round(daLoja * 100) / 100
+          : Math.round(computeCouponDiscount(cupomAplicado, linhas, desconto) * 100) / 100
+      } else if (contratoDeCupom && cuponsNaoEncontrados.length) {
+        // A loja descontou com um cupom que o sistema não conhece. Não dá para
+        // recalcular — então o valor abatido entra como desconto do pedido, e o
+        // total fecha com o que o cliente pagou. É estável: `recalcOrderCommission`
+        // reescreve `coupon_discount`, nunca `orders.discount`.
+        desconto = Math.round((desconto + Math.max(0, parseFloat(b.desconto_cupom) || 0)) * 100) / 100
+      }
+
+      const totalCalculado = Math.round((subtotal - desconto - couponDiscount + frete) * 100) / 100
+      const totalPago = b.total_pago === undefined || b.total_pago === null
+        ? null
+        : Math.max(0, parseFloat(b.total_pago) || 0)
+      // Divergência entre a nossa conta e a cobrança da loja não invalida o
+      // pedido (ele está pago), mas tem de ficar VISÍVEL: é o sintoma de cupom
+      // do Woo com regra que o sistema não modela, ou de deploy fora de ordem.
+      const divergencia = totalPago === null ? 0 : Math.round((totalCalculado - totalPago) * 100) / 100
+
       const cru = String(b.pagamento || '').trim()
       const notas = [
         `Pedido pago no site (loja #${lojaId}).`,
         cru ? `Forma de pagamento informada pela loja: ${cru}.` : null,
+        cupomAplicado
+          ? `Cupom ${cupomAplicado.code} aplicado${cupomAplicado.partner_id ? ' (gera comissao de parceiro)' : ''}.`
+          : null,
+        cupomAplicado && !cupomAplicado.active
+          ? `ATENCAO: o cupom ${cupomAplicado.code} esta INATIVO no sistema, mas foi usado na loja.`
+          : null,
+        cuponsNaoEncontrados.length
+          ? `ATENCAO: cupom(ns) usado(s) na loja e nao cadastrado(s) no sistema: ${cuponsNaoEncontrados.join(', ')} — sem comissao de parceiro.`
+          : null,
+        cuponsIgnorados.length
+          ? `ATENCAO: pedido veio com mais de um cupom; ignorado(s): ${cuponsIgnorados.join(', ')}.`
+          : null,
+        Math.abs(divergencia) > 0.05
+          ? `ATENCAO: total calculado R$ ${totalCalculado.toFixed(2)} difere do pago na loja R$ ${totalPago.toFixed(2)} (dif R$ ${divergencia.toFixed(2)}).`
+          : null,
         inativos.length ? `ATENCAO: vendido com projeto fora do catalogo: ${inativos.join(', ')}.` : null,
         String(b.observacoes || '').trim() || null,
       ].filter(Boolean).join(' ')
@@ -638,44 +816,31 @@ async function storeOrder (req, res) {
           status:       'Confirmed',
           channel:      'Site',
           from_catalog: true,
-          discount:     Math.max(0, parseFloat(b.desconto) || 0),
-          shipping:     Math.max(0, parseFloat(b.frete) || 0),
+          discount:     desconto,
+          shipping:     frete,
+          // Quanto do `discount` é Pix. Guardar isto é o que impede
+          // `ajustaDescontoPix` de SOMAR outros 3% na primeira edição de item
+          // do pedido: ele move o desconto pelo delta contra este valor.
+          pix_discount: pixDaLoja,
+          coupon_id:       cupomAplicado ? cupomAplicado.id : null,
+          coupon_discount: couponDiscount,
           payment_method: metodoDePagamento(cru),
-          amount_paid:  b.total_pago === undefined || b.total_pago === null
-            ? null
-            : Math.max(0, parseFloat(b.total_pago) || 0),
+          amount_paid:  totalPago,
           payment_date: String(b.pago_em || '').slice(0, 10) || null,
           notes:        notas,
         })
         .returning('*')
 
-      // PREÇO VEM DA REQUISIÇÃO, e isto é o certo: quem cobrou foi a loja, e o
-      // valor cobrado é o que ela diz. Buscar em `price_lists` aqui faria o
-      // pedido divergir da cobrança sempre que a tabela mudasse entre a venda e
-      // o webhook, ou sempre que houver promoção no site. É seguro porque o
-      // endpoint está atrás do segredo de sincronização, servidor-a-servidor.
-      // Não "corrija" isto resolvendo o preço no servidor.
-      const itens = itensBody
-        .map(i => {
-          const p = porSku[String(i.sku || '').trim()]
-          if (!p) return null
-          const qtd = parseFloat(i.quantidade) || 0
-          if (qtd <= 0) return null
-          return {
-            order_id:      order.id,
-            product_id:    p[0].id,
-            product_name:  p[0].project_name,
-            product_ref:   p[0].sku || '',
-            volume_ml:     parseFloat(i.volume_ml) || 0,
-            quantity:      qtd,
-            unit_price:    Math.max(0, parseFloat(i.preco_unitario) || 0),
-            item_discount: 0,
-          }
-        })
-        .filter(Boolean)
+      await trx('order_items').insert(linhas.map(l => ({ ...l, order_id: order.id })))
 
-      if (!itens.length) throw new Error('Nenhum item valido apos a validacao')
-      await trx('order_items').insert(itens)
+      if (cupomAplicado) {
+        // Mesmo par de efeitos do pedido digitado à mão: contabiliza o uso e
+        // credita a comissão. O pedido do site nasce `Confirmed`, e desde
+        // 13/11/2026 a comissão nasce a partir de Confirmado — então ela é
+        // creditada aqui mesmo, sem carência nem job.
+        await trx('coupons').where({ id: cupomAplicado.id }).increment('current_uses', 1)
+        await syncOrderCommission(order, cupomAplicado, subtotal, couponDiscount, trx)
+      }
 
       return {
         ja_existia: false,
@@ -683,7 +848,11 @@ async function storeOrder (req, res) {
         order_code: order.code,
         status: order.status,
         customer_id: registro.id,
-        itens: itens.length,
+        itens: linhas.length,
+        cupom_aplicado: cupomAplicado ? cupomAplicado.code : null,
+        comissao_parceiro: !!(cupomAplicado && cupomAplicado.partner_id),
+        total_calculado: totalCalculado,
+        divergencia_total: Math.abs(divergencia) > 0.05 ? divergencia : 0,
       }
     })
 
@@ -715,6 +884,12 @@ async function storeOrder (req, res) {
     res.status(resultado.ja_existia ? 200 : 201).json({
       ...resultado,
       projetos_fora_do_catalogo: inativos,
+      // Devolvido para a LOJA escrever na nota do pedido. Um código que não
+      // casa falha em silêncio por natureza (o total fecha, só a comissão não
+      // nasce); devolver aqui é o que torna o erro visível em quem olha o
+      // pedido no wp-admin, em vez de só numa linha do Postgres.
+      cupons_nao_encontrados: cuponsNaoEncontrados,
+      cupons_ignorados: cuponsIgnorados,
       aviso_estoque: avisoEstoque,
     })
   } catch (error) {
