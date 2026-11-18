@@ -814,6 +814,16 @@ async function storeOrder (req, res) {
           // isso que `catalogAvailability` desconta o pendente dos pedidos em
           // aberto. As duas coisas são o mesmo laço.
           status:       'Confirmed',
+          // O pedido do site NASCE Confirmado, sem passar por `updateStatus` —
+          // que é quem normalmente liga este flag. Sem ele, `addBottling` cai no
+          // `if (order.stock_decremented)` e NÃO abate `quantity_available`: o
+          // envase vinculado na Fila de Produção continuava aparecendo no Estoque
+          // Acabado (relato de 18/11/2026) e, pior, podia ser vinculado de novo a
+          // outro pedido e seguia anunciado como "pronto" na vitrine.
+          // É verdade por vacuidade aqui: o pedido nasce sem nenhum vínculo, então
+          // "os vínculos deste pedido já foram aplicados ao estoque" é fato. Fica
+          // idêntico a um pedido do kanban confirmado antes de existir envase.
+          stock_decremented: true,
           channel:      'Site',
           from_catalog: true,
           discount:     desconto,
